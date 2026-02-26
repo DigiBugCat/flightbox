@@ -27,7 +27,15 @@ export async function query(
 ): Promise<Record<string, unknown>[]> {
   const conn = await getConnection();
   const reader = await conn.runAndReadAll(sql);
-  return reader.getRowObjects() as Record<string, unknown>[];
+  const rows = reader.getRowObjects() as Record<string, unknown>[];
+  // Convert BigInt values to numbers (DuckDB returns BIGINT as BigInt)
+  return rows.map((row) => {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(row)) {
+      out[k] = typeof v === "bigint" ? Number(v) : v;
+    }
+    return out;
+  });
 }
 
 function parquetGlob(): string {
