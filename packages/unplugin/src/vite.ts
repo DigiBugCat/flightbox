@@ -5,6 +5,7 @@ import type { Span } from "@flightbox/core";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { execSync } from "node:child_process";
 import { WebSocketServer } from "ws";
 import type { Plugin } from "vite";
 import type { FlightboxPluginOptions } from "./index.js";
@@ -119,13 +120,45 @@ class ParquetWriter {
   }
 }
 
+// ── Git blast radius ──────────────────────────────────────────────────
+
+function getGitChangedFiles(): string[] {
+  try {
+    const output = execSync("git diff --name-only HEAD~5 HEAD 2>/dev/null || git diff --name-only HEAD 2>/dev/null", {
+      encoding: "utf8",
+      timeout: 3000,
+    });
+    return output
+      .split("\n")
+      .map((f) => f.trim())
+      .filter((f) => f && /\.[jt]sx?$/.test(f));
+  } catch {
+    return [];
+  }
+}
+
 // ── Vite plugin ───────────────────────────────────────────────────────
 
 export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
   const tracesDir = join(homedir(), ".flightbox", "traces");
 
+  // Build include patterns from git blast radius + explicit includes
+  const gitFiles = getGitChangedFiles();
+  const gitPatterns = gitFiles.map((f) => `**/${f}`);
+  const userInclude = options?.include ?? [];
+  const mergedInclude = [...gitPatterns, ...userInclude];
+
+  if (mergedInclude.length > 0) {
+    console.log(`[flightbox] instrumenting ${gitFiles.length} git-changed files${userInclude.length ? ` + ${userInclude.length} include patterns` : ""}`);
+  }
+
+  const mergedOptions: FlightboxPluginOptions = {
+    ...options,
+    include: mergedInclude.length > 0 ? mergedInclude : undefined,
+  };
+
   // Re-use the unplugin transform as a Vite plugin
-  const transformPlugin = unplugin.vite(options) as Plugin;
+  const transformPlugin = unplugin.vite(mergedOptions) as Plugin;
 
   const serverPlugin: Plugin = {
     name: "flightbox:server",
