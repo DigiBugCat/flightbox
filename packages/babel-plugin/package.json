@@ -1,0 +1,27 @@
+{
+  "name": "@flightbox/babel-plugin",
+  "version": "0.0.1",
+  "description": "Babel plugin for auto-instrumenting functions with Flightbox",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@babel/core": "^7.26.0",
+    "@babel/helper-plugin-utils": "^7.25.0",
+    "@babel/types": "^7.26.0",
+    "picomatch": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/babel__core": "^7.20.0",
+    "@types/picomatch": "^3.0.0"
+  }
+}

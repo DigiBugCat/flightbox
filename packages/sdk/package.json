@@ -1,0 +1,21 @@
+{
+  "name": "@flightbox/sdk",
+  "version": "0.0.1",
+  "description": "Runtime SDK for Flightbox instrumentation",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@flightbox/core": "workspace:*",
+    "@duckdb/node-api": "1.4.4-r.1"
+  }
+}

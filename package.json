@@ -1,0 +1,17 @@
+{
+  "name": "flightbox",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Passive causality tracing for dev-time debugging",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
