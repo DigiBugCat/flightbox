@@ -2,6 +2,7 @@ import { DuckDBInstance } from "@duckdb/node-api";
 import type { DuckDBConnection } from "@duckdb/node-api";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { readdirSync, statSync, unlinkSync } from "node:fs";
 
 let instance: DuckDBInstance | null = null;
 let connection: DuckDBConnection | null = null;
@@ -11,6 +12,34 @@ export function getTracesDir(): string {
     process.env.FLIGHTBOX_TRACES_DIR ??
     join(homedir(), ".flightbox", "traces")
   );
+}
+
+/**
+ * Remove empty (0-byte) parquet files that would break read_parquet glob.
+ * Runs lazily — cheap to call often since it's a single readdir + stat.
+ */
+export function cleanEmptyParquetFiles(): number {
+  const dir = getTracesDir();
+  let removed = 0;
+  try {
+    const files = readdirSync(dir);
+    for (const f of files) {
+      if (!f.endsWith(".parquet")) continue;
+      const filepath = join(dir, f);
+      try {
+        const st = statSync(filepath);
+        if (st.size === 0) {
+          unlinkSync(filepath);
+          removed++;
+        }
+      } catch {
+        // File may have been deleted between readdir and stat
+      }
+    }
+  } catch {
+    // Traces dir may not exist yet
+  }
+  return removed;
 }
 
 export async function getConnection(): Promise<DuckDBConnection> {
@@ -25,6 +54,9 @@ export async function getConnection(): Promise<DuckDBConnection> {
 export async function query(
   sql: string,
 ): Promise<Record<string, unknown>[]> {
+  // Clean up any 0-byte files before querying
+  cleanEmptyParquetFiles();
+
   const conn = await getConnection();
   const reader = await conn.runAndReadAll(sql);
   const rows = reader.getRowObjects() as Record<string, unknown>[];

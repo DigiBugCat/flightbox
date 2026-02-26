@@ -77,4 +77,29 @@ function b() { return 2; }
     const output = transform(`function test() { return 1; }`);
     expect(output).toContain("src/app.ts");
   });
+
+  it("preserves function declaration hoisting", () => {
+    const output = transform(`function foo() { return 1; }`);
+    // Should remain a function declaration, not become const
+    expect(output).toContain("function foo()");
+    expect(output).not.toMatch(/^const foo/m);
+    expect(output).toContain("__flightbox_wrap");
+    expect(output).toContain(".apply(this, arguments)");
+  });
+
+  it("wraps class field arrow functions", () => {
+    const output = transform(`class App {
+  handleClick = (e) => { console.log(e); }
+}`);
+    expect(output).toContain("__flightbox_wrap");
+    expect(output).toContain('"handleClick"');
+  });
+
+  it("handles class methods with destructured params", () => {
+    const output = transform(`class Svc {
+  update({ id, name }) { return id; }
+}`);
+    expect(output).toContain("__flightbox_wrap");
+    expect(output).toContain(".apply(this, arguments)");
+  });
 });

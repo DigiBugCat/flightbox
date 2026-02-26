@@ -1,4 +1,5 @@
 import { DuckDBInstance } from "@duckdb/node-api";
+import type { DuckDBConnection } from "@duckdb/node-api";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Span } from "@flightbox/core";
@@ -23,6 +24,24 @@ CREATE TABLE spans (
   tags VARCHAR
 )`;
 
+// Singleton DuckDB connection — reused across flushes to avoid leaking instances
+let conn: DuckDBConnection | null = null;
+let connReady: Promise<DuckDBConnection> | null = null;
+
+async function getConnection(): Promise<DuckDBConnection> {
+  if (conn) return conn;
+  if (connReady) return connReady;
+
+  connReady = (async () => {
+    const instance = await DuckDBInstance.create(":memory:");
+    conn = await instance.connect();
+    await conn.run(SCHEMA_SQL);
+    return conn;
+  })();
+
+  return connReady;
+}
+
 export async function flushToParquet(
   spans: Span[],
   tracesDir: string,
@@ -34,13 +53,10 @@ export async function flushToParquet(
   const filename = `${Date.now()}-${process.pid}-${counter()}.parquet`;
   const filepath = join(tracesDir, filename);
 
-  const instance = await DuckDBInstance.create(":memory:");
-  const conn = await instance.connect();
-
-  await conn.run(SCHEMA_SQL);
+  const db = await getConnection();
 
   // Use appender for efficient bulk insertion
-  const appender = await conn.createAppender("spans");
+  const appender = await db.createAppender("spans");
 
   for (const s of spans) {
     appender.appendVarchar(s.span_id);
@@ -65,9 +81,10 @@ export async function flushToParquet(
   appender.flushSync();
   appender.closeSync();
 
-  await conn.run(
+  await db.run(
     `COPY spans TO '${filepath.replace(/'/g, "''")}' (FORMAT PARQUET)`,
   );
+  await db.run("DELETE FROM spans");
 }
 
 let _counter = 0;

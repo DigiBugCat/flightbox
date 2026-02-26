@@ -116,20 +116,45 @@ export default function flightboxBabelPlugin(
         ) as NodePath<BabelTypes.Program>;
         ensureImport(programPath, state);
 
-        const funcExpr = t.functionExpression(
-          path.node.id,
-          path.node.params,
-          path.node.body,
-          path.node.generator,
-          path.node.async,
-        );
+        // For exported declarations, convert to const (exports aren't hoisted anyway)
+        if (
+          path.parentPath?.isExportNamedDeclaration() ||
+          path.parentPath?.isExportDefaultDeclaration()
+        ) {
+          const funcExpr = t.functionExpression(
+            path.node.id,
+            path.node.params,
+            path.node.body,
+            path.node.generator,
+            path.node.async,
+          );
 
-        const wrapped = buildWrapCall(funcExpr, name, state.filename, line);
-        const varDecl = t.variableDeclaration("const", [
-          t.variableDeclarator(t.identifier(name), wrapped),
-        ]);
+          const wrapped = buildWrapCall(funcExpr, name, state.filename, line);
+          const varDecl = t.variableDeclaration("const", [
+            t.variableDeclarator(t.identifier(name), wrapped),
+          ]);
 
-        path.replaceWith(varDecl);
+          path.replaceWith(varDecl);
+        } else {
+          // Preserve hoisting: rewrite body to delegate to wrapped inner function
+          const innerFunc = t.functionExpression(
+            null,
+            [],
+            path.node.body,
+            path.node.generator,
+            path.node.async,
+          );
+
+          const wrapped = buildWrapCall(innerFunc, name, state.filename, line);
+          const callExpr = t.callExpression(
+            t.memberExpression(wrapped, t.identifier("apply")),
+            [t.thisExpression(), t.identifier("arguments")],
+          );
+
+          path.node.body = t.blockStatement([
+            t.returnStatement(callExpr),
+          ]);
+        }
       },
 
       "ArrowFunctionExpression|FunctionExpression"(
@@ -167,6 +192,35 @@ export default function flightboxBabelPlugin(
         path.skip();
       },
 
+      ClassProperty(path, state) {
+        if (!state.shouldInstrument) return;
+        const value = path.node.value;
+        if (
+          !value ||
+          (!t.isArrowFunctionExpression(value) &&
+            !t.isFunctionExpression(value))
+        ) {
+          return;
+        }
+
+        const name = t.isIdentifier(path.node.key)
+          ? path.node.key.name
+          : "<computed>";
+        const line = path.node.loc?.start.line;
+        const programPath = path.findParent((p) =>
+          p.isProgram(),
+        ) as NodePath<BabelTypes.Program>;
+        ensureImport(programPath, state);
+
+        path.node.value = buildWrapCall(
+          value,
+          name,
+          state.filename,
+          line,
+        );
+        path.skip();
+      },
+
       ClassMethod(path, state) {
         if (!state.shouldInstrument) return;
         if (path.node.kind === "constructor") return;
@@ -193,20 +247,34 @@ export default function flightboxBabelPlugin(
 
         const wrapped = buildWrapCall(funcExpr, name, state.filename, line);
 
-        // Build args list from params
-        const args: BabelTypes.Expression[] = params.map((p) => {
-          if (t.isIdentifier(p)) return t.cloneNode(p);
-          if (t.isAssignmentPattern(p) && t.isIdentifier(p.left))
-            return t.cloneNode(p.left);
-          if (t.isRestElement(p) && t.isIdentifier(p.argument))
-            return t.spreadElement(t.cloneNode(p.argument)) as unknown as BabelTypes.Expression;
-          return t.identifier("undefined");
-        });
-
-        const callExpr = t.callExpression(
-          t.memberExpression(wrapped, t.identifier("call")),
-          [t.thisExpression(), ...args],
+        // Build args list from params — fall back to arguments if any are destructured
+        const hasDestructured = params.some(
+          (p) =>
+            t.isObjectPattern(p) ||
+            t.isArrayPattern(p) ||
+            (t.isAssignmentPattern(p) && (t.isObjectPattern(p.left) || t.isArrayPattern(p.left))),
         );
+
+        let callExpr: BabelTypes.CallExpression;
+        if (hasDestructured) {
+          callExpr = t.callExpression(
+            t.memberExpression(wrapped, t.identifier("apply")),
+            [t.thisExpression(), t.identifier("arguments")],
+          );
+        } else {
+          const args: BabelTypes.Expression[] = params.map((p) => {
+            if (t.isIdentifier(p)) return t.cloneNode(p);
+            if (t.isAssignmentPattern(p) && t.isIdentifier(p.left))
+              return t.cloneNode(p.left);
+            if (t.isRestElement(p) && t.isIdentifier(p.argument))
+              return t.spreadElement(t.cloneNode(p.argument)) as unknown as BabelTypes.Expression;
+            return t.identifier("undefined");
+          });
+          callExpr = t.callExpression(
+            t.memberExpression(wrapped, t.identifier("call")),
+            [t.thisExpression(), ...args],
+          );
+        }
 
         path.node.body = t.blockStatement([
           t.returnStatement(callExpr),

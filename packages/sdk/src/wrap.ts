@@ -8,6 +8,10 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
   fn: T,
   meta: SpanMeta,
 ): T {
+  // Detect generator functions — they return iterators, not promises
+  const isGenerator = fn.constructor?.name === "GeneratorFunction" ||
+    fn.constructor?.name === "AsyncGeneratorFunction";
+
   const wrapped = function (this: unknown, ...args: unknown[]) {
     const cfg = getConfig();
     if (!cfg.enabled) return fn.apply(this, args);
@@ -21,6 +25,13 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
       () => {
         try {
           const result = fn.apply(this, args);
+
+          // Generators return iterators — record the span immediately and pass through
+          if (isGenerator) {
+            completeSpan(span, "[Generator]");
+            bufferSpan(span);
+            return result;
+          }
 
           if (result && typeof result === "object" && typeof (result as any).then === "function") {
             return (result as Promise<unknown>).then(

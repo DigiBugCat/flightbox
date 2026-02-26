@@ -115,4 +115,54 @@ function b() { return 2; }
     expect(output).toContain("__flightbox_wrap");
     expect(output).toContain('"greet"');
   });
+
+  it("preserves function declaration hoisting", () => {
+    const output = t(`function foo() { return 1; }`);
+    // Should remain a function declaration (hoisted), not become const
+    expect(output).toContain("function foo()");
+    expect(output).not.toContain("const foo");
+    expect(output).toContain("__flightbox_wrap");
+    expect(output).toContain(".apply(this, arguments)");
+  });
+
+  it("handles class methods with destructured params", () => {
+    const output = t(`class Svc {
+  update({ id, name }) { return id; }
+}`);
+    expect(output).toContain("__flightbox_wrap");
+    // Should fall back to .apply(this, arguments) for destructured params
+    expect(output).toContain(".apply(this, arguments)");
+  });
+
+  it("handles generator methods", () => {
+    const output = t(`class Iter {
+  *items() { yield 1; yield 2; }
+}`);
+    expect(output).toContain("__flightbox_wrap");
+    expect(output).toContain("function*()");
+  });
+
+  it("wraps class field arrow functions", () => {
+    const output = t(`class App {
+  handleClick = (e) => { console.log(e); }
+}`);
+    expect(output).toContain("__flightbox_wrap");
+    expect(output).toContain('"handleClick"');
+  });
+
+  it("wraps class field function expressions", () => {
+    const output = t(`class App {
+  process = function(data) { return data; }
+}`);
+    expect(output).toContain("__flightbox_wrap");
+    expect(output).toContain('"process"');
+  });
+
+  it("does not wrap class fields that are not functions", () => {
+    const output = t(`class App {
+  count = 0;
+  name = "test";
+}`);
+    expect(output).not.toContain("__flightbox_wrap");
+  });
 });

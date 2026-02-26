@@ -46,8 +46,9 @@ export function inferName(node: Node, parent: Node | null): string {
 
 /**
  * Extract parameter names from a function's params for .call() delegation.
+ * Returns null if any param is a destructured pattern (use `arguments` instead).
  */
-export function extractParamNames(params: Node[]): string[] {
+export function extractParamNames(params: Node[]): string[] | null {
   const names: string[] = [];
   for (const p of params) {
     if (p.type === "Identifier") {
@@ -56,6 +57,11 @@ export function extractParamNames(params: Node[]): string[] {
       names.push((p as any).left.name);
     } else if (p.type === "RestElement" && (p as any).argument?.type === "Identifier") {
       names.push(`...${(p as any).argument.name}`);
+    } else if (p.type === "ObjectPattern" || p.type === "ArrayPattern") {
+      // Destructured params can't be forwarded by name — signal to use `arguments`
+      return null;
+    } else if (p.type === "AssignmentPattern" && ((p as any).left?.type === "ObjectPattern" || (p as any).left?.type === "ArrayPattern")) {
+      return null;
     } else {
       names.push("undefined");
     }

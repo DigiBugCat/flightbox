@@ -126,4 +126,50 @@ describe("__flightbox_wrap", () => {
 
     expect(obj.getValue()).toBe(42);
   });
+
+  it("wraps generator functions without breaking iteration", async () => {
+    const { __flightbox_wrap } = await import("../src/wrap.js");
+    const { configure } = await import("../src/config.js");
+
+    configure({ enabled: true });
+
+    function* counter() {
+      yield 1;
+      yield 2;
+      yield 3;
+    }
+
+    const wrapped = __flightbox_wrap(counter, {
+      name: "counter",
+      module: "test.ts",
+      line: 1,
+    });
+
+    const values = [...wrapped()];
+    expect(values).toEqual([1, 2, 3]);
+  });
+
+  it("wraps async generator functions", async () => {
+    const { __flightbox_wrap } = await import("../src/wrap.js");
+    const { configure } = await import("../src/config.js");
+
+    configure({ enabled: true });
+
+    async function* asyncRange() {
+      yield 1;
+      yield 2;
+    }
+
+    const wrapped = __flightbox_wrap(asyncRange, {
+      name: "asyncRange",
+      module: "test.ts",
+      line: 1,
+    });
+
+    const values: number[] = [];
+    for await (const v of wrapped()) {
+      values.push(v);
+    }
+    expect(values).toEqual([1, 2]);
+  });
 });

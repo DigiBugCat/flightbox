@@ -139,12 +139,49 @@ export function createTransformer(options: TransformOptions = {}) {
             s.overwrite(exportStart, start, "export default __flightbox_wrap(");
             s.appendLeft(end, ", " + meta + ")");
           } else {
-            // function foo() {} → const foo = __flightbox_wrap(function foo() {}, meta)
-            s.prependLeft(start, "const " + name + " = __flightbox_wrap(");
-            // Remove the declaration keyword range so it becomes an expression
-            // Actually we keep the full text — `function foo() {}` in expression position IS a FunctionExpression
-            s.appendLeft(end, ", " + meta + ")");
+            // Preserve hoisting: rewrite the body to delegate to a wrapped inner function
+            // function foo(a, b) { body } → function foo(a, b) { return __flightbox_wrap(function() { body }, meta).apply(this, arguments); }
+            const funcExpr = (node as any).value ?? node;
+            const body = (funcExpr as any).body;
+            if (body && body.type === "BlockStatement") {
+              const bodyStart = (body as any).start as number;
+              const bodyEnd = (body as any).end as number;
+              const originalBody = code.slice(bodyStart, bodyEnd);
+              const asyncPrefix = (node as any).async ? "async " : "";
+              const genPrefix = (node as any).generator ? "*" : "";
+              const newBody = `{ return __flightbox_wrap(${asyncPrefix}function${genPrefix}() ${originalBody}, ${meta}).apply(this, arguments); }`;
+              s.overwrite(bodyStart, bodyEnd, newBody);
+            }
           }
+
+          needsImport = true;
+          this.skip();
+          return;
+        }
+
+        // Class field arrow functions: handleClick = () => { ... }
+        if (node.type === "PropertyDefinition") {
+          const pd = node as any;
+          const value = pd.value;
+          if (
+            !value ||
+            (value.type !== "ArrowFunctionExpression" &&
+              value.type !== "FunctionExpression")
+          ) {
+            return;
+          }
+
+          const keyName =
+            pd.key?.type === "Identifier"
+              ? pd.key.name
+              : "<computed>";
+          const meta = buildMeta(keyName, filename, line);
+
+          const valueStart = (value as any).start as number;
+          const valueEnd = (value as any).end as number;
+
+          s.prependRight(valueStart, "__flightbox_wrap(");
+          s.appendLeft(valueEnd, ", " + meta + ")");
 
           needsImport = true;
           this.skip();
@@ -166,6 +203,11 @@ export function createTransformer(options: TransformOptions = {}) {
 
           // Skip if this is a class method's value — handled by MethodDefinition
           if (parent?.type === "MethodDefinition") {
+            return;
+          }
+
+          // Skip if this is a class field's value — handled by PropertyDefinition
+          if (parent?.type === "PropertyDefinition") {
             return;
           }
 
@@ -207,14 +249,15 @@ export function createTransformer(options: TransformOptions = {}) {
             (p: any) => p.type !== "TSParameterProperty",
           );
           const paramNames = extractParamNames(params);
-          const callArgs = paramNames.join(", ");
 
           const asyncPrefix = funcExpr.async ? "async " : "";
           const genPrefix = funcExpr.generator ? "*" : "";
 
           // Replace the body with a delegation to __flightbox_wrap
-          const newBody =
-            `{ return __flightbox_wrap(${asyncPrefix}function${genPrefix}() ${originalBody}, ${meta}).call(this${callArgs ? ", " + callArgs : ""}); }`;
+          // If paramNames is null (destructured params), fall back to .apply(this, arguments)
+          const newBody = paramNames
+            ? `{ return __flightbox_wrap(${asyncPrefix}function${genPrefix}() ${originalBody}, ${meta}).call(this${paramNames.length ? ", " + paramNames.join(", ") : ""}); }`
+            : `{ return __flightbox_wrap(${asyncPrefix}function${genPrefix}() ${originalBody}, ${meta}).apply(this, arguments); }`;
 
           s.overwrite(bodyStart, bodyEnd, newBody);
 
