@@ -106,7 +106,7 @@ server.tool(
 server.tool(
   "flightbox_query",
   "Run arbitrary DuckDB SQL against the spans table. Use `spans` as the table name. " +
-  "Supports JSON_EXTRACT_STRING(input, '$.path') for digging into serialized args/returns, " +
+  "Supports JSON_EXTRACT_STRING(input, '$.path') for digging into serialized args/returns/context, " +
   "aggregations, window functions, CTEs — full DuckDB SQL. " +
   "Use this for ad-hoc analysis like grouping by extracted fields, finding hot paths, " +
   "comparing entity performance, etc.",

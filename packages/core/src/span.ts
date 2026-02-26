@@ -6,6 +6,7 @@ export function createSpan(
   meta: SpanMeta,
   parent: SpanContext | undefined,
   args: unknown[],
+  context?: unknown,
 ): Span {
   const sid = spanId();
   const tid = parent?.trace_id ?? traceId();
@@ -21,6 +22,7 @@ export function createSpan(
     input: serialize(args),
     output: null,
     error: null,
+    context: context !== undefined ? serialize(context, { maxDepth: 1 }) : null,
     started_at: Date.now(),
     ended_at: null,
     duration_ms: null,

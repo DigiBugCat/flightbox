@@ -120,7 +120,7 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
     if (!config.enabled) return fn.apply(this, args);
 
     const parent = callStack[callStack.length - 1] ?? undefined;
-    const span = createSpan(meta, parent, args);
+    const span = createSpan(meta, parent, args, this);
 
     const ctx: SpanContext = { trace_id: span.trace_id, span_id: span.span_id };
     callStack.push(ctx);

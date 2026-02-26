@@ -11,6 +11,7 @@ export interface Span {
   input: string | null;
   output: string | null;
   error: string | null;
+  context: string | null;
 
   started_at: number;
   ended_at: number | null;

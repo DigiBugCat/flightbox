@@ -15,6 +15,7 @@ CREATE TABLE spans (
   input VARCHAR,
   output VARCHAR,
   error VARCHAR,
+  context VARCHAR,
   started_at BIGINT,
   ended_at BIGINT,
   duration_ms DOUBLE,
@@ -52,6 +53,7 @@ export async function flushToParquet(
     appender.appendVarchar(s.input ?? "");
     appender.appendVarchar(s.output ?? "");
     appender.appendVarchar(s.error ?? "");
+    appender.appendVarchar(s.context ?? "");
     appender.appendBigInt(BigInt(s.started_at));
     appender.appendBigInt(BigInt(s.ended_at ?? 0));
     appender.appendDouble(s.duration_ms ?? 0);

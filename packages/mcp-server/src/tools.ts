@@ -359,6 +359,7 @@ export const querySchema = z.object({
     "SQL query against the spans table. Use `spans` as the table name. " +
     "Columns: span_id, trace_id, parent_id, kind, name, module, file_line, " +
     "input (JSON string), output (JSON string), error (JSON string), " +
+    "context (JSON string — serialized `this` for class methods, null otherwise), " +
     "started_at (BIGINT epoch ms), ended_at (BIGINT epoch ms), duration_ms (DOUBLE), " +
     "git_sha, tags. " +
     "DuckDB SQL — supports JSON_EXTRACT_STRING(input, '$[0].id'), aggregations, window functions, etc. " +

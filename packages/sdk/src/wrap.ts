@@ -13,7 +13,7 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
     if (!cfg.enabled) return fn.apply(this, args);
 
     const parent = storage.getStore();
-    const span = createSpan(meta, parent, args);
+    const span = createSpan(meta, parent, args, this);
     span.git_sha = cfg.gitSha;
 
     return storage.run(
