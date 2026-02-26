@@ -1,0 +1,31 @@
+{
+  "name": "@flightbox/register",
+  "version": "0.0.2",
+  "description": "Node.js loader hook for Flightbox auto-instrumentation",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@flightbox/sdk": "workspace:*",
+    "@flightbox/transform": "workspace:*",
+    "esbuild": "^0.25.0"
+  }
+}
