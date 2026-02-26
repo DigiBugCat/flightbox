@@ -6,7 +6,8 @@
   "scripts": {
     "build": "pnpm -r build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench:wrap": "tsx scripts/bench-wrap-overhead.ts"
   },
   "devDependencies": {
     "@types/node": "^25.3.1",

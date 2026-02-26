@@ -6,6 +6,7 @@ import picomatch from "picomatch";
 import type { Node } from "estree";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { inferName, extractParamNames } from "./names.js";
 
 export interface TransformOptions {
@@ -20,8 +21,68 @@ export interface TransformResult {
 
 const TsParser = Parser.extend(tsPlugin());
 
+interface ClassWrapInstruction {
+  targetExpr: string;
+  keyExpr: string;
+  meta: string;
+}
+
+interface TransformDebugSample {
+  filename: string;
+  durationMs: number;
+  wrappedNodes: number;
+  instrumented: boolean;
+}
+
 // Cache: directory path → package name (or null if no package.json found)
 const pkgNameCache = new Map<string, string | null>();
+const debugTransformEnabled = process.env.FLIGHTBOX_DEBUG_TRANSFORM === "1";
+const transformDebugSamples: TransformDebugSample[] = [];
+let transformDebugHookInstalled = false;
+
+function ensureTransformDebugHook(): void {
+  if (!debugTransformEnabled || transformDebugHookInstalled) return;
+  transformDebugHookInstalled = true;
+
+  process.on("exit", () => {
+    if (transformDebugSamples.length === 0) return;
+
+    const total = transformDebugSamples.length;
+    const instrumented = transformDebugSamples.filter((s) => s.instrumented);
+    const totalWrapped = instrumented.reduce((sum, s) => sum + s.wrappedNodes, 0);
+    const topSlowest = [...transformDebugSamples]
+      .sort((a, b) => b.durationMs - a.durationMs)
+      .slice(0, 10);
+
+    console.log(
+      `[flightbox] transform debug: files=${total}, instrumented=${instrumented.length}, wrapped_nodes=${totalWrapped}`,
+    );
+    if (topSlowest.length > 0) {
+      console.log("[flightbox] transform debug: slowest files:");
+      for (const sample of topSlowest) {
+        console.log(
+          `  - ${sample.durationMs.toFixed(2)}ms wraps=${sample.wrappedNodes} ${sample.filename}`,
+        );
+      }
+    }
+  });
+}
+
+function recordTransformDebug(
+  filename: string,
+  startedAt: number,
+  wrappedNodes: number,
+  instrumented: boolean,
+): void {
+  if (!debugTransformEnabled) return;
+  ensureTransformDebugHook();
+  transformDebugSamples.push({
+    filename,
+    durationMs: performance.now() - startedAt,
+    wrappedNodes,
+    instrumented,
+  });
+}
 
 /**
  * Find the nearest package.json and return its `name` field.
@@ -67,6 +128,52 @@ function buildMeta(name: string, filename: string, line: number): string {
   return `{ name: ${escapedName}, module: ${escapedModule}, line: ${line} }`;
 }
 
+function isClassNode(node: Node): boolean {
+  return node.type === "ClassDeclaration" || node.type === "ClassExpression";
+}
+
+function getMethodNameForMeta(md: any): string {
+  if (md.key?.type === "Identifier") return md.key.name;
+  if (
+    md.key?.type === "Literal" &&
+    (typeof md.key.value === "string" || typeof md.key.value === "number")
+  ) {
+    return String(md.key.value);
+  }
+  return "<computed>";
+}
+
+function getEligibleMethodKeyExpr(md: any): string | null {
+  if (md.kind !== "method") return null;
+  if (md.computed) return null;
+  if (md.key?.type === "PrivateIdentifier") return null;
+
+  if (md.key?.type === "Identifier") return JSON.stringify(md.key.name);
+  if (
+    md.key?.type === "Literal" &&
+    (typeof md.key.value === "string" || typeof md.key.value === "number")
+  ) {
+    return JSON.stringify(md.key.value);
+  }
+
+  return null;
+}
+
+function buildClassStaticWrapBlock(
+  wraps: ClassWrapInstruction[],
+): string {
+  const lines = wraps.map((w) => [
+    `    {`,
+    `      const __fb_desc = Object.getOwnPropertyDescriptor(${w.targetExpr}, ${w.keyExpr});`,
+    `      if (__fb_desc && typeof __fb_desc.value === "function") {`,
+    `        Object.defineProperty(${w.targetExpr}, ${w.keyExpr}, { ...__fb_desc, value: __flightbox_wrap(__fb_desc.value, ${w.meta}) });`,
+    "      }",
+    "    }",
+  ].join("\n"));
+
+  return `\n  static {\n${lines.join("\n")}\n  }\n`;
+}
+
 /**
  * Create a reusable transformer with pre-compiled include/exclude matchers.
  */
@@ -82,6 +189,9 @@ export function createTransformer(options: TransformOptions = {}) {
     code: string,
     filename: string,
   ): TransformResult | null {
+    const debugStart = performance.now();
+    let wrappedNodes = 0;
+
     if (excludeMatcher(filename)) return null;
     if (!includeMatcher(filename)) return null;
 
@@ -97,14 +207,21 @@ export function createTransformer(options: TransformOptions = {}) {
       }) as unknown as Node;
     } catch {
       // If we can't parse it, skip it
+      recordTransformDebug(filename, debugStart, wrappedNodes, false);
       return null;
     }
 
     const s = new MagicString(code);
     let needsImport = false;
+    const classStack: Node[] = [];
+    const classWraps = new Map<Node, ClassWrapInstruction[]>();
 
     walk(ast, {
       enter(node: Node, parent: Node | null) {
+        if (isClassNode(node)) {
+          classStack.push(node);
+        }
+
         // Skip already-wrapped nodes
         if (
           node.type === "CallExpression" &&
@@ -139,8 +256,8 @@ export function createTransformer(options: TransformOptions = {}) {
             s.overwrite(exportStart, start, "export default __flightbox_wrap(");
             s.appendLeft(end, ", " + meta + ")");
           } else {
-            // Preserve hoisting: rewrite the body to delegate to a wrapped inner function
-            // function foo(a, b) { body } → function foo(a, b) { return __flightbox_wrap(function() { body }, meta).apply(this, arguments); }
+            // Preserve hoisting and avoid per-call wrapper construction by caching
+            // the wrapped implementation on the function object.
             const funcExpr = (node as any).value ?? node;
             const body = (funcExpr as any).body;
             if (body && body.type === "BlockStatement") {
@@ -149,12 +266,22 @@ export function createTransformer(options: TransformOptions = {}) {
               const originalBody = code.slice(bodyStart, bodyEnd);
               const asyncPrefix = (node as any).async ? "async " : "";
               const genPrefix = (node as any).generator ? "*" : "";
-              const newBody = `{ return __flightbox_wrap(${asyncPrefix}function${genPrefix}() ${originalBody}, ${meta}).apply(this, arguments); }`;
+              const params = ((node as any).params ?? [])
+                .map((p: any) => code.slice((p as any).start as number, (p as any).end as number))
+                .join(", ");
+              const cacheExpr = `${name}.__flightbox_wrapped`;
+              const wrappedExpr =
+                `${cacheExpr} || (${cacheExpr} = __flightbox_wrap(${asyncPrefix}function${genPrefix}(${params}) ${originalBody}, ${meta}))`;
+              const invoke = (node as any).generator
+                ? "return yield* __fb_wrapped.apply(this, arguments);"
+                : "return __fb_wrapped.apply(this, arguments);";
+              const newBody = `{ const __fb_wrapped = ${wrappedExpr}; ${invoke} }`;
               s.overwrite(bodyStart, bodyEnd, newBody);
             }
           }
 
           needsImport = true;
+          wrappedNodes++;
           this.skip();
           return;
         }
@@ -184,6 +311,7 @@ export function createTransformer(options: TransformOptions = {}) {
           s.appendLeft(valueEnd, ", " + meta + ")");
 
           needsImport = true;
+          wrappedNodes++;
           this.skip();
           return;
         }
@@ -219,6 +347,7 @@ export function createTransformer(options: TransformOptions = {}) {
           s.appendLeft(end, ", " + meta + ")");
 
           needsImport = true;
+          wrappedNodes++;
           this.skip();
           return;
         }
@@ -227,11 +356,26 @@ export function createTransformer(options: TransformOptions = {}) {
           const md = node as any;
           if (md.kind === "constructor") return;
 
-          const keyName =
-            md.key?.type === "Identifier"
-              ? md.key.name
-              : "<computed>";
+          const keyName = getMethodNameForMeta(md);
           const meta = buildMeta(keyName, filename, line);
+          const keyExpr = getEligibleMethodKeyExpr(md);
+
+          if (keyExpr) {
+            const classNode = classStack[classStack.length - 1];
+            if (classNode) {
+              const wraps = classWraps.get(classNode) ?? [];
+              wraps.push({
+                targetExpr: md.static ? "this" : "this.prototype",
+                keyExpr,
+                meta,
+              });
+              classWraps.set(classNode, wraps);
+              needsImport = true;
+              wrappedNodes++;
+              this.skip();
+              return;
+            }
+          }
 
           const funcExpr = md.value;
           if (!funcExpr || funcExpr.type !== "FunctionExpression") return;
@@ -253,24 +397,45 @@ export function createTransformer(options: TransformOptions = {}) {
           const asyncPrefix = funcExpr.async ? "async " : "";
           const genPrefix = funcExpr.generator ? "*" : "";
 
-          // Replace the body with a delegation to __flightbox_wrap
-          // If paramNames is null (destructured params), fall back to .apply(this, arguments)
-          const newBody = paramNames
-            ? `{ return __flightbox_wrap(${asyncPrefix}function${genPrefix}() ${originalBody}, ${meta}).call(this${paramNames.length ? ", " + paramNames.join(", ") : ""}); }`
-            : `{ return __flightbox_wrap(${asyncPrefix}function${genPrefix}() ${originalBody}, ${meta}).apply(this, arguments); }`;
+          // Fallback path (private/computed/accessor methods): keep body rewrite.
+          const wrappedCall = paramNames
+            ? `__flightbox_wrap(${asyncPrefix}function${genPrefix}() ${originalBody}, ${meta}).call(this${paramNames.length ? ", " + paramNames.join(", ") : ""})`
+            : `__flightbox_wrap(${asyncPrefix}function${genPrefix}() ${originalBody}, ${meta}).apply(this, arguments)`;
+          const invoke = funcExpr.generator
+            ? `return yield* ${wrappedCall};`
+            : `return ${wrappedCall};`;
+          const newBody = `{ ${invoke} }`;
 
           s.overwrite(bodyStart, bodyEnd, newBody);
 
           needsImport = true;
+          wrappedNodes++;
           this.skip();
           return;
         }
       },
+      leave(node: Node) {
+        if (!isClassNode(node)) return;
+
+        const wraps = classWraps.get(node);
+        if (wraps && wraps.length > 0) {
+          const classBody = (node as any).body;
+          const insertAt = (classBody.end as number) - 1;
+          s.appendLeft(insertAt, buildClassStaticWrapBlock(wraps));
+        }
+
+        classStack.pop();
+      },
     });
 
-    if (!needsImport) return null;
+    if (!needsImport) {
+      recordTransformDebug(filename, debugStart, wrappedNodes, false);
+      return null;
+    }
 
     s.prepend('import { __flightbox_wrap } from "@flightbox/sdk";\n');
+
+    recordTransformDebug(filename, debugStart, wrappedNodes, true);
 
     return {
       code: s.toString(),

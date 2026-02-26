@@ -8,16 +8,22 @@ import {
   inspectSchema,
   walkSchema,
   searchSchema,
+  recentSchema,
   siblingsSchema,
   failingSchema,
+  entitiesSchema,
+  entityTimelineSchema,
   querySchema,
   flightboxSummary,
   flightboxChildren,
   flightboxInspect,
   flightboxWalk,
   flightboxSearch,
+  flightboxRecent,
   flightboxSiblings,
   flightboxFailing,
+  flightboxEntities,
+  flightboxEntityTimeline,
   flightboxQuery,
 } from "./tools.js";
 
@@ -82,6 +88,17 @@ server.tool(
 );
 
 server.tool(
+  "flightbox_recent",
+  "Polling-friendly incremental feed for runtime inspectors. Returns spans ordered by time since a cursor (since_started_at + since_span_id).",
+  recentSchema.shape,
+  async (params) => ({
+    content: [
+      { type: "text", text: JSON.stringify(await flightboxRecent(params), null, 2) },
+    ],
+  }),
+);
+
+server.tool(
   "flightbox_siblings",
   "Everything that ran under the same parent, in execution order.",
   siblingsSchema.shape,
@@ -99,6 +116,28 @@ server.tool(
   async (params) => ({
     content: [
       { type: "text", text: JSON.stringify(await flightboxFailing(params), null, 2) },
+    ],
+  }),
+);
+
+server.tool(
+  "flightbox_entities",
+  "Summarize tracked entity activity by type/id. Use this to see created/updated/deleted entities (for example PAWN) over time windows.",
+  entitiesSchema.shape,
+  async (params) => ({
+    content: [
+      { type: "text", text: JSON.stringify(await flightboxEntities(params), null, 2) },
+    ],
+  }),
+);
+
+server.tool(
+  "flightbox_entity_timeline",
+  "Timeline for one entity type (and optional id), including span anchors so you can walk the call graph around each entity mutation.",
+  entityTimelineSchema.shape,
+  async (params) => ({
+    content: [
+      { type: "text", text: JSON.stringify(await flightboxEntityTimeline(params), null, 2) },
     ],
   }),
 );

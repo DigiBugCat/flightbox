@@ -15,6 +15,36 @@ function and(...clauses: (string | undefined | "")[]): string {
   return clauses.filter(Boolean).join(" AND ");
 }
 
+type SpanRow = Record<string, unknown>;
+
+interface EntityEventRow {
+  action: string;
+  entity_type: string;
+  entity_id?: string;
+  snapshot?: string | null;
+  changes?: string | null;
+  note?: string;
+  dimensions?: Record<string, string | number | boolean | null>;
+  at: number;
+  span_id: string;
+  trace_id: string;
+  parent_id: string | null;
+  name: string;
+  module: string;
+  started_at: number;
+  duration_ms: number | null;
+  has_error: boolean;
+}
+
+interface EntityEventFilter {
+  entity_type?: string;
+  entity_id?: string;
+  action?: string;
+  trace_id?: string;
+  last_n_minutes?: number;
+  limit?: number;
+}
+
 // ─── Tool Schemas ───
 
 export const summarySchema = z.object({
@@ -49,6 +79,14 @@ export const searchSchema = z.object({
   last_n_minutes: z.number().optional(),
 });
 
+export const recentSchema = z.object({
+  since_started_at: z.number().optional(),
+  since_span_id: z.string().optional(),
+  trace_id: z.string().optional(),
+  has_error: z.boolean().optional(),
+  limit: z.number().default(200),
+});
+
 export const siblingsSchema = z.object({
   span_id: z.string(),
 });
@@ -56,6 +94,23 @@ export const siblingsSchema = z.object({
 export const failingSchema = z.object({
   error_pattern: z.string().optional(),
   last_n_minutes: z.number().optional(),
+});
+
+export const entitiesSchema = z.object({
+  entity_type: z.string().optional(),
+  action: z.enum(["create", "update", "delete", "upsert", "custom"]).optional(),
+  trace_id: z.string().optional(),
+  last_n_minutes: z.number().optional(),
+  limit: z.number().default(200),
+});
+
+export const entityTimelineSchema = z.object({
+  entity_type: z.string(),
+  entity_id: z.string().optional(),
+  action: z.enum(["create", "update", "delete", "upsert", "custom"]).optional(),
+  trace_id: z.string().optional(),
+  last_n_minutes: z.number().optional(),
+  limit: z.number().default(200),
 });
 
 // ─── Tool Implementations ───
@@ -129,20 +184,41 @@ export async function flightboxSummary(
 export async function flightboxChildren(
   params: z.infer<typeof childrenSchema>,
 ) {
-  const spans = await query(
-    fromSpans(
-      `parent_id = '${esc(params.span_id)}'`,
-      "started_at ASC",
-    ),
-  );
+  const out: Record<string, unknown>[] = [];
+  const visited = new Set<string>();
+  const maxDepth = Math.max(1, params.depth ?? 1);
 
-  return spans.map((s) => ({
-    span_id: s.span_id,
-    name: s.name,
-    duration_ms: s.duration_ms,
-    has_error: !!(s.error && s.error !== ""),
-    ...(params.include_args ? { input: s.input, output: s.output } : {}),
-  }));
+  async function walk(parentId: string, depth: number): Promise<void> {
+    if (depth > maxDepth) return;
+
+    const spans = await query(
+      fromSpans(
+        `parent_id = '${esc(parentId)}'`,
+        "started_at ASC",
+      ),
+    );
+
+    for (const s of spans) {
+      const spanId = String(s.span_id);
+      if (visited.has(spanId)) continue;
+      visited.add(spanId);
+
+      out.push({
+        span_id: s.span_id,
+        parent_id: s.parent_id,
+        depth,
+        name: s.name,
+        duration_ms: s.duration_ms,
+        has_error: !!(s.error && s.error !== ""),
+        ...(params.include_args ? { input: s.input, output: s.output } : {}),
+      });
+
+      await walk(spanId, depth + 1);
+    }
+  }
+
+  await walk(params.span_id, 1);
+  return out;
 }
 
 export async function flightboxInspect(
@@ -241,8 +317,12 @@ export async function flightboxSearch(
   if (params.name_pattern) {
     clauses.push(`name ILIKE '%${esc(params.name_pattern)}%'`);
   }
-  if (params.has_error) {
-    clauses.push(`error IS NOT NULL AND error != ''`);
+  if (params.has_error !== undefined) {
+    clauses.push(
+      params.has_error
+        ? `error IS NOT NULL AND error != ''`
+        : `(error IS NULL OR error = '')`,
+    );
   }
   if (params.min_duration_ms != null) {
     clauses.push(`duration_ms >= ${params.min_duration_ms}`);
@@ -284,6 +364,67 @@ export async function flightboxSearch(
     duration_ms: s.duration_ms,
     has_error: !!(s.error && s.error !== ""),
   }));
+}
+
+export async function flightboxRecent(
+  params: z.infer<typeof recentSchema>,
+) {
+  const clauses: string[] = [];
+  const limit = Math.max(1, Math.min(1000, Math.floor(params.limit)));
+
+  if (params.trace_id) {
+    clauses.push(`trace_id = '${esc(params.trace_id)}'`);
+  }
+  if (params.has_error !== undefined) {
+    clauses.push(
+      params.has_error
+        ? `error IS NOT NULL AND error != ''`
+        : `(error IS NULL OR error = '')`,
+    );
+  }
+  if (params.since_started_at != null) {
+    const since = Math.floor(params.since_started_at);
+    if (params.since_span_id) {
+      clauses.push(
+        `(started_at > ${since} OR (started_at = ${since} AND span_id > '${esc(params.since_span_id)}'))`,
+      );
+    } else {
+      clauses.push(`started_at > ${since}`);
+    }
+  }
+
+  const where = clauses.length > 0 ? clauses.join(" AND ") : undefined;
+  const spans = await query(
+    fromSpans(where, "started_at ASC, span_id ASC") + ` LIMIT ${limit}`,
+  );
+
+  const items = spans.map((s) => ({
+    span_id: String(s.span_id ?? ""),
+    parent_id: String(s.parent_id ?? ""),
+    trace_id: String(s.trace_id ?? ""),
+    name: String(s.name ?? ""),
+    module: String(s.module ?? ""),
+    started_at: toNumber(s.started_at) ?? 0,
+    ended_at: toNumber(s.ended_at) ?? 0,
+    duration_ms: toNumber(s.duration_ms) ?? 0,
+    has_error: !!(s.error && s.error !== ""),
+  }));
+
+  const last = items.at(-1);
+  return {
+    count: items.length,
+    spans: items,
+    has_more: items.length === limit,
+    next_cursor: last
+      ? {
+          since_started_at: last.started_at,
+          since_span_id: last.span_id,
+        }
+      : {
+          since_started_at: params.since_started_at ?? null,
+          since_span_id: params.since_span_id ?? null,
+        },
+  };
 }
 
 export async function flightboxSiblings(
@@ -352,6 +493,86 @@ export async function flightboxFailing(
   }));
 }
 
+export async function flightboxEntities(
+  params: z.infer<typeof entitiesSchema>,
+) {
+  const events = await loadEntityEvents(params);
+  const byType = new Map<string, {
+    total_events: number;
+    actions: Record<string, number>;
+    entity_ids: Set<string>;
+    first_seen_at: number;
+    last_seen_at: number;
+  }>();
+
+  for (const ev of events) {
+    const bucket = byType.get(ev.entity_type) ?? {
+      total_events: 0,
+      actions: {},
+      entity_ids: new Set<string>(),
+      first_seen_at: ev.at,
+      last_seen_at: ev.at,
+    };
+    bucket.total_events++;
+    bucket.actions[ev.action] = (bucket.actions[ev.action] ?? 0) + 1;
+    if (ev.entity_id) bucket.entity_ids.add(ev.entity_id);
+    bucket.first_seen_at = Math.min(bucket.first_seen_at, ev.at);
+    bucket.last_seen_at = Math.max(bucket.last_seen_at, ev.at);
+    byType.set(ev.entity_type, bucket);
+  }
+
+  const types = [...byType.entries()]
+    .map(([entityType, bucket]) => ({
+      entity_type: entityType,
+      total_events: bucket.total_events,
+      unique_entities: bucket.entity_ids.size,
+      actions: bucket.actions,
+      first_seen_at: bucket.first_seen_at,
+      last_seen_at: bucket.last_seen_at,
+    }))
+    .sort((a, b) => b.total_events - a.total_events);
+
+  return {
+    total_events: events.length,
+    unique_entity_types: types.length,
+    entity_types: types,
+    sample_events: events.slice(0, Math.max(1, Math.min(20, params.limit))),
+  };
+}
+
+export async function flightboxEntityTimeline(
+  params: z.infer<typeof entityTimelineSchema>,
+) {
+  const events = await loadEntityEvents({
+    ...params,
+    entity_type: params.entity_type,
+  });
+
+  const timeline = events
+    .sort((a, b) => a.at - b.at)
+    .slice(0, Math.max(1, Math.min(1000, params.limit)));
+
+  const callGraphAnchors = timeline.map((ev) => ({
+    at: ev.at,
+    action: ev.action,
+    entity_type: ev.entity_type,
+    entity_id: ev.entity_id,
+    span_id: ev.span_id,
+    parent_id: ev.parent_id,
+    trace_id: ev.trace_id,
+    function: ev.name,
+    module: ev.module,
+  }));
+
+  return {
+    entity_type: params.entity_type,
+    entity_id: params.entity_id ?? null,
+    total_events: timeline.length,
+    timeline,
+    call_graph_anchors: callGraphAnchors,
+  };
+}
+
 // ─── Raw SQL Query ───
 
 export const querySchema = z.object({
@@ -383,6 +604,91 @@ export async function flightboxQuery(
   }
 }
 
+async function loadEntityEvents(
+  filter: EntityEventFilter,
+): Promise<EntityEventRow[]> {
+  const where = and(
+    `tags IS NOT NULL`,
+    `tags != ''`,
+    filter.trace_id ? `trace_id = '${esc(filter.trace_id)}'` : "",
+    timeFilter(filter.last_n_minutes),
+  );
+
+  const rows = await query(
+    fromSpans(where, "started_at DESC") +
+      ` LIMIT ${Math.max(100, Math.min(10000, (filter.limit ?? 200) * 10))}`,
+  );
+
+  const events = rows.flatMap(parseEntityEventsFromSpan);
+  return events
+    .filter((ev) => !filter.entity_type || ev.entity_type === filter.entity_type)
+    .filter((ev) => !filter.entity_id || ev.entity_id === filter.entity_id)
+    .filter((ev) => !filter.action || ev.action === filter.action)
+    .sort((a, b) => b.at - a.at)
+    .slice(0, Math.max(1, Math.min(2000, filter.limit ?? 200)));
+}
+
+function parseEntityEventsFromSpan(span: SpanRow): EntityEventRow[] {
+  const tagsRaw = span.tags;
+  if (!tagsRaw || typeof tagsRaw !== "string") return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(tagsRaw);
+  } catch {
+    return [];
+  }
+
+  const entities = (parsed as { entities?: unknown[] }).entities;
+  if (!Array.isArray(entities) || entities.length === 0) return [];
+
+  const spanId = String(span.span_id ?? "");
+  const traceId = String(span.trace_id ?? "");
+  if (!spanId || !traceId) return [];
+
+  const parentIdRaw = span.parent_id;
+  const parentId = parentIdRaw && String(parentIdRaw).length > 0
+    ? String(parentIdRaw)
+    : null;
+
+  const startedAt = toNumber(span.started_at) ?? Date.now();
+  const durationMs = toNumber(span.duration_ms);
+  const hasError = !!(span.error && span.error !== "");
+
+  const out: EntityEventRow[] = [];
+  for (const entity of entities) {
+    if (!entity || typeof entity !== "object") continue;
+    const raw = entity as Record<string, unknown>;
+    const entityType = typeof raw.entity_type === "string"
+      ? raw.entity_type
+      : "";
+    const action = typeof raw.action === "string" ? raw.action : "";
+    if (!entityType || !action) continue;
+
+    const at = toNumber(raw.at) ?? startedAt;
+    out.push({
+      action,
+      entity_type: entityType,
+      entity_id: typeof raw.entity_id === "string" ? raw.entity_id : undefined,
+      snapshot: typeof raw.snapshot === "string" ? raw.snapshot : null,
+      changes: typeof raw.changes === "string" ? raw.changes : null,
+      note: typeof raw.note === "string" ? raw.note : undefined,
+      dimensions: isRecord(raw.dimensions) ? normalizeDimensions(raw.dimensions) : undefined,
+      at,
+      span_id: spanId,
+      trace_id: traceId,
+      parent_id: parentId,
+      name: String(span.name ?? ""),
+      module: String(span.module ?? ""),
+      started_at: startedAt,
+      duration_ms: durationMs,
+      has_error: hasError,
+    });
+  }
+
+  return out;
+}
+
 // ─── Helpers ───
 
 async function resolveAncestors(
@@ -401,6 +707,37 @@ async function resolveAncestors(
     ids.push(current);
   }
   return ids;
+}
+
+function toNumber(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "bigint") return Number(v);
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function normalizeDimensions(
+  input: Record<string, unknown>,
+): Record<string, string | number | boolean | null> {
+  const out: Record<string, string | number | boolean | null> = {};
+  for (const [k, v] of Object.entries(input)) {
+    if (
+      v === null ||
+      typeof v === "string" ||
+      typeof v === "number" ||
+      typeof v === "boolean"
+    ) {
+      out[k] = v;
+    }
+  }
+  return out;
 }
 
 async function resolveDescendants(

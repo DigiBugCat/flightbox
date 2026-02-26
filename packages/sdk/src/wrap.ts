@@ -3,6 +3,7 @@ import type { SpanMeta } from "@flightbox/core";
 import { storage } from "./context.js";
 import { getConfig } from "./config.js";
 import { bufferSpan } from "./buffer.js";
+import { beginEntityTracking, finalizeEntityTracking } from "./entity.js";
 
 export function __flightbox_wrap<T extends (...args: any[]) => any>(
   fn: T,
@@ -19,6 +20,7 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
     const parent = storage.getStore();
     const span = createSpan(meta, parent, args, this);
     span.git_sha = cfg.gitSha;
+    beginEntityTracking(span.span_id);
 
     return storage.run(
       { trace_id: span.trace_id, span_id: span.span_id },
@@ -29,6 +31,7 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
           // Generators return iterators — record the span immediately and pass through
           if (isGenerator) {
             completeSpan(span, "[Generator]");
+            finalizeEntityTracking(span);
             bufferSpan(span);
             return result;
           }
@@ -37,11 +40,13 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
             return (result as Promise<unknown>).then(
               (val) => {
                 completeSpan(span, val);
+                finalizeEntityTracking(span);
                 bufferSpan(span);
                 return val;
               },
               (err) => {
                 failSpan(span, err);
+                finalizeEntityTracking(span);
                 bufferSpan(span);
                 throw err;
               },
@@ -49,10 +54,12 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
           }
 
           completeSpan(span, result);
+          finalizeEntityTracking(span);
           bufferSpan(span);
           return result;
         } catch (err) {
           failSpan(span, err);
+          finalizeEntityTracking(span);
           bufferSpan(span);
           throw err;
         }

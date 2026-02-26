@@ -183,7 +183,7 @@ Browser (main thread)              Vite dev server            MCP server
 
 ## MCP tools
 
-**`@flightbox/mcp-server`** — Exposes 8 tools over MCP:
+**`@flightbox/mcp-server`** — Exposes 11 tools over MCP:
 
 | Tool | What it does |
 |------|-------------|
@@ -192,9 +192,33 @@ Browser (main thread)              Vite dev server            MCP server
 | `flightbox_inspect` | Full detail on one span — serialized args, return value, error + stack. |
 | `flightbox_walk` | Walk up or down the call tree from any span. |
 | `flightbox_search` | Find spans by function name, text in args/output/errors, duration, etc. |
+| `flightbox_recent` | Polling-friendly incremental feed. Fetch spans since a cursor (`since_started_at` + `since_span_id`). |
 | `flightbox_siblings` | Everything that ran under the same parent, in execution order. |
 | `flightbox_failing` | Recent errors, grouped by error type. |
+| `flightbox_entities` | Entity-level summary from tracked mutations (create/update/delete/upsert/custom). |
+| `flightbox_entity_timeline` | Time-ordered entity mutation stream with span IDs so you can walk the call graph. |
 | `flightbox_query` | Raw DuckDB SQL against spans. Full power — aggregations, JSON extraction, window functions. |
+
+### Entity mutation tracking
+
+When domain entities are created/updated/deleted in your code, annotate those points directly:
+
+```ts
+import {
+  trackEntityCreate,
+  trackEntityUpdate,
+  trackEntityDelete,
+} from '@flightbox/sdk'
+
+trackEntityCreate('PAWN', pawn.id, pawn, { zone: pawn.zone })
+trackEntityUpdate('PAWN', pawn.id, { x: { from: 12, to: 14 } }, pawn, { frame: tick })
+trackEntityDelete('PAWN', pawn.id, pawn)
+```
+
+These entity events are attached to the current span and become queryable via:
+
+- `flightbox_entities` to answer "what entity types changed recently?"
+- `flightbox_entity_timeline` to answer "show me PAWN changes over time and where in the call graph they happened"
 
 ### Raw SQL queries
 
@@ -244,6 +268,7 @@ Each function call produces a span:
 - **output** — JSON-serialized return value
 - **error** — JSON-serialized error with stack trace
 - **context** — JSON-serialized `this` for class methods (depth 1, primitives prioritized). `null` for non-method calls.
+- **tags** — optional structured metadata attached to a span (for example tracked entity mutations)
 - **started_at / ended_at / duration_ms** — timing
 - **git_sha** — which commit
 
@@ -290,6 +315,47 @@ configure({
 | `@flightbox/mcp-server` | MCP query tools | [![npm](https://img.shields.io/npm/v/@flightbox/mcp-server)](https://www.npmjs.com/package/@flightbox/mcp-server) |
 | `@flightbox/core` | Shared types & serializer | [![npm](https://img.shields.io/npm/v/@flightbox/core)](https://www.npmjs.com/package/@flightbox/core) |
 | `@flightbox/babel-plugin` | Babel transform (legacy) | [![npm](https://img.shields.io/npm/v/@flightbox/babel-plugin)](https://www.npmjs.com/package/@flightbox/babel-plugin) |
+
+## Performance benchmarking
+
+Measure wrapper-construction overhead (legacy per-call style vs wrap-once style):
+
+```bash
+pnpm bench:wrap
+```
+
+Optional tuning knobs:
+
+- `BENCH_RUNS` (default `5`)
+- `BENCH_SYNC_ITERS` (default `300000`)
+- `BENCH_METHOD_ITERS` (default `300000`)
+- `BENCH_ASYNC_ITERS` (default `40000`)
+
+The benchmark prints:
+
+1. human-readable per-scenario summary (legacy ms, optimized ms, improvement %, speedup)
+2. machine-readable JSON report for regression tracking
+
+For stable comparisons:
+
+- run on a mostly idle machine
+- keep Node version fixed
+- compare multiple consecutive runs, not a single sample
+
+### Transform diagnostics
+
+To inspect transformer overhead and wrapping volume while running your app/build:
+
+```bash
+FLIGHTBOX_DEBUG_TRANSFORM=1 <your-command>
+```
+
+At process exit, Flightbox logs:
+
+- total transformed files
+- how many files were instrumented
+- total wrapped nodes
+- top 10 slowest transformed files
 
 ## License
 

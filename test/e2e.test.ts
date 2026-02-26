@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 // SDK imports
-import { __flightbox_wrap, configure, flush } from "@flightbox/sdk";
+import {
+  __flightbox_wrap,
+  configure,
+  flush,
+  trackEntityCreate,
+  trackEntityUpdate,
+} from "@flightbox/sdk";
 
 // MCP tool imports (we test them directly, not via MCP protocol)
 import {
@@ -13,8 +19,11 @@ import {
   flightboxInspect,
   flightboxWalk,
   flightboxSearch,
+  flightboxRecent,
   flightboxSiblings,
   flightboxFailing,
+  flightboxEntities,
+  flightboxEntityTimeline,
 } from "../packages/mcp-server/src/tools.js";
 
 let tracesDir: string;
@@ -37,7 +46,7 @@ function processOrder(items: string[]): { total: number; items: string[] } {
   return { total, items };
 }
 
-function getPrice(item: string): number {
+function resolvePrice(item: string): number {
   if (item === "widget") return 10;
   if (item === "gadget") return 25;
   return 5;
@@ -51,6 +60,13 @@ async function fetchUser(id: string): Promise<{ id: string; name: string }> {
 
 function explode(): never {
   throw new Error("Something went wrong!");
+}
+
+interface Pawn {
+  id: string;
+  x: number;
+  y: number;
+  hp: number;
 }
 
 // ─── Wrapped versions ───
@@ -67,10 +83,18 @@ const wrappedMultiply = __flightbox_wrap(multiply, {
   line: 26,
 });
 
-const wrappedGetPrice = __flightbox_wrap(getPrice, {
+const wrappedResolvePrice = __flightbox_wrap(resolvePrice, {
+  name: "resolvePrice",
+  module: "test/e2e.test.ts",
+  line: 42,
+});
+
+const wrappedGetPrice = __flightbox_wrap(function getPrice(item: string) {
+  return wrappedResolvePrice(item);
+}, {
   name: "getPrice",
   module: "test/e2e.test.ts",
-  line: 36,
+  line: 46,
 });
 
 const wrappedProcessOrder = __flightbox_wrap(
@@ -87,14 +111,39 @@ const wrappedProcessOrder = __flightbox_wrap(
 const wrappedFetchUser = __flightbox_wrap(fetchUser, {
   name: "fetchUser",
   module: "test/e2e.test.ts",
-  line: 42,
+  line: 52,
 });
 
 const wrappedExplode = __flightbox_wrap(explode, {
   name: "explode",
   module: "test/e2e.test.ts",
-  line: 48,
+  line: 58,
 });
+
+const wrappedCreatePawn = __flightbox_wrap(function createPawn(id: string): Pawn {
+  const pawn: Pawn = { id, x: 0, y: 0, hp: 100 };
+  trackEntityCreate("PAWN", id, pawn, { zone: "alpha" });
+  return pawn;
+}, {
+  name: "createPawn",
+  module: "test/e2e.test.ts",
+  line: 62,
+});
+
+const wrappedMovePawn = __flightbox_wrap(
+  function movePawn(pawn: Pawn, nextX: number, nextY: number): Pawn {
+    const next: Pawn = { ...pawn, x: nextX, y: nextY };
+    trackEntityUpdate(
+      "PAWN",
+      pawn.id,
+      { x: { from: pawn.x, to: nextX }, y: { from: pawn.y, to: nextY } },
+      next,
+      { zone: "alpha", op: "move" },
+    );
+    return next;
+  },
+  { name: "movePawn", module: "test/e2e.test.ts", line: 71 },
+);
 
 describe("Flightbox E2E", () => {
   beforeAll(() => {
@@ -142,7 +191,14 @@ describe("Flightbox E2E", () => {
     expect(() => wrappedExplode()).toThrow("Something went wrong!");
   });
 
-  it("Step 5: Flush writes Parquet files to disk", async () => {
+  it("Step 5: SDK tracks entity create/update activity", () => {
+    const pawn = wrappedCreatePawn("pawn-1");
+    const moved = wrappedMovePawn(pawn, 3, 4);
+    expect(moved.x).toBe(3);
+    expect(moved.y).toBe(4);
+  });
+
+  it("Step 6: Flush writes Parquet files to disk", async () => {
     // Force flush all buffered spans
     await flush();
 
@@ -154,7 +210,7 @@ describe("Flightbox E2E", () => {
     }
   });
 
-  it("Step 6: MCP flightbox_summary reads traces", async () => {
+  it("Step 7: MCP flightbox_summary reads traces", async () => {
     const summary = await flightboxSummary({});
     console.log("  Summary:", JSON.stringify(summary, null, 2));
 
@@ -164,7 +220,7 @@ describe("Flightbox E2E", () => {
     expect((summary as any).total_spans).toBeGreaterThan(0);
   });
 
-  it("Step 7: MCP flightbox_search finds functions by name", async () => {
+  it("Step 8: MCP flightbox_search finds functions by name", async () => {
     const results = await flightboxSearch({ name_pattern: "processOrder" });
     console.log(
       "  Search results for 'processOrder':",
@@ -176,7 +232,7 @@ describe("Flightbox E2E", () => {
     expect((results as any[])[0].name).toBe("processOrder");
   });
 
-  it("Step 8: MCP flightbox_inspect returns full span data", async () => {
+  it("Step 9: MCP flightbox_inspect returns full span data", async () => {
     // Find a processOrder span first
     const results = await flightboxSearch({ name_pattern: "processOrder" });
     const span = (results as any[])[0];
@@ -190,13 +246,14 @@ describe("Flightbox E2E", () => {
     expect((inspected as any).name).toBe("processOrder");
   });
 
-  it("Step 9: MCP flightbox_children shows nested calls", async () => {
+  it("Step 10: MCP flightbox_children respects depth for nested calls", async () => {
     // processOrder should have children: add and getPrice calls
     const results = await flightboxSearch({ name_pattern: "processOrder" });
     const span = (results as any[])[0];
 
     const children = await flightboxChildren({
       span_id: span.span_id,
+      depth: 2,
       include_args: true,
     });
     console.log(
@@ -211,9 +268,14 @@ describe("Flightbox E2E", () => {
     const childNames = (children as any[]).map((c: any) => c.name);
     expect(childNames).toContain("add");
     expect(childNames).toContain("getPrice");
+    expect(childNames).toContain("resolvePrice");
+
+    const depthMap = new Map((children as any[]).map((c: any) => [c.name, c.depth]));
+    expect(depthMap.get("getPrice")).toBe(1);
+    expect(depthMap.get("resolvePrice")).toBe(2);
   });
 
-  it("Step 10: MCP flightbox_walk traces causality chain", async () => {
+  it("Step 11: MCP flightbox_walk traces causality chain", async () => {
     // Find a getPrice span and walk up to processOrder
     const results = await flightboxSearch({ name_pattern: "getPrice" });
     const span = (results as any[])[0];
@@ -230,7 +292,7 @@ describe("Flightbox E2E", () => {
     expect(names).toContain("processOrder");
   });
 
-  it("Step 11: MCP flightbox_siblings shows execution order", async () => {
+  it("Step 12: MCP flightbox_siblings shows execution order", async () => {
     // Find a getPrice span (child of processOrder) and get siblings
     const results = await flightboxSearch({ name_pattern: "getPrice" });
     const span = (results as any[])[0];
@@ -244,7 +306,7 @@ describe("Flightbox E2E", () => {
     }
   });
 
-  it("Step 12: MCP flightbox_failing finds the explode error", async () => {
+  it("Step 13: MCP flightbox_failing finds the explode error", async () => {
     const failing = await flightboxFailing({});
     console.log("  Failing spans:", JSON.stringify(failing, null, 2));
 
@@ -258,7 +320,7 @@ describe("Flightbox E2E", () => {
     expect(allErrors).toContain("explode");
   });
 
-  it("Step 13: MCP flightbox_search with text finds error content", async () => {
+  it("Step 14: MCP flightbox_search with text finds error content", async () => {
     const results = await flightboxSearch({ text: "went wrong" });
     console.log(
       "  Text search 'went wrong':",
@@ -267,5 +329,64 @@ describe("Flightbox E2E", () => {
 
     expect(Array.isArray(results)).toBe(true);
     expect((results as any[]).length).toBeGreaterThan(0);
+  });
+
+  it("Step 14b: MCP flightbox_search supports has_error=false", async () => {
+    const okResults = await flightboxSearch({
+      name_pattern: "processOrder",
+      has_error: false,
+    });
+    console.log(
+      "  Successful search for 'processOrder':",
+      JSON.stringify(okResults, null, 2),
+    );
+
+    expect(Array.isArray(okResults)).toBe(true);
+    expect((okResults as any[]).length).toBeGreaterThan(0);
+    expect((okResults as any[]).every((s) => s.has_error === false)).toBe(true);
+  });
+
+  it("Step 14c: MCP flightbox_recent supports cursor-based polling", async () => {
+    const first = await flightboxRecent({ limit: 3 });
+    console.log("  Recent batch #1:", JSON.stringify(first, null, 2));
+
+    expect((first as any).count).toBe(3);
+    expect(Array.isArray((first as any).spans)).toBe(true);
+    expect((first as any).next_cursor).toBeTruthy();
+
+    const cursor = (first as any).next_cursor;
+    const second = await flightboxRecent({
+      since_started_at: cursor.since_started_at,
+      since_span_id: cursor.since_span_id,
+      limit: 3,
+    });
+    console.log("  Recent batch #2:", JSON.stringify(second, null, 2));
+
+    expect(Array.isArray((second as any).spans)).toBe(true);
+    expect((second as any).count).toBeGreaterThan(0);
+  });
+
+  it("Step 15: MCP flightbox_entities summarizes PAWN activity", async () => {
+    const entities = await flightboxEntities({ entity_type: "PAWN", limit: 50 });
+    console.log("  Entity summary:", JSON.stringify(entities, null, 2));
+
+    expect((entities as any).total_events).toBeGreaterThan(0);
+    const types = (entities as any).entity_types as any[];
+    expect(types.some((t) => t.entity_type === "PAWN")).toBe(true);
+  });
+
+  it("Step 16: MCP flightbox_entity_timeline shows PAWN changes over time", async () => {
+    const timeline = await flightboxEntityTimeline({
+      entity_type: "PAWN",
+      entity_id: "pawn-1",
+      limit: 50,
+    });
+    console.log("  PAWN timeline:", JSON.stringify(timeline, null, 2));
+
+    expect((timeline as any).total_events).toBeGreaterThan(0);
+    const actions = ((timeline as any).timeline as any[]).map((e) => e.action);
+    expect(actions).toContain("create");
+    expect(actions).toContain("update");
+    expect(((timeline as any).call_graph_anchors as any[]).length).toBeGreaterThan(0);
   });
 });

@@ -13,6 +13,8 @@ describe("@flightbox/transform", () => {
 }`);
     expect(output).toContain("__flightbox_wrap");
     expect(output).toContain('"processOrder"');
+    expect(output).toContain("processOrder.__flightbox_wrapped");
+    expect(output).not.toContain("return __flightbox_wrap(");
     expect(output).toContain("@flightbox/sdk");
   });
 
@@ -81,17 +83,17 @@ function b() { return 2; }
     expect(output).toContain("export default __flightbox_wrap(");
   });
 
-  it("wraps class methods but skips constructors", () => {
+  it("wraps class methods once via static block and skips constructors", () => {
     const output = t(`class Foo {
   constructor() {}
   doWork(x) { return x * 2; }
 }`);
     expect(output).toContain("__flightbox_wrap");
     expect(output).toContain('"doWork"');
-    // constructor body should not be wrapped
-    const wrapCount = (output.match(/__flightbox_wrap/g) || []).length;
-    // One for the import, one for doWork
-    expect(wrapCount).toBe(2);
+    expect(output).toContain("static {");
+    expect(output).toContain("Object.getOwnPropertyDescriptor(this.prototype, \"doWork\")");
+    // constructor should remain untouched
+    expect(output).toContain("constructor() {}");
   });
 
   it("does not double-wrap already wrapped functions", () => {
@@ -125,12 +127,21 @@ function b() { return 2; }
     expect(output).toContain(".apply(this, arguments)");
   });
 
-  it("handles class methods with destructured params", () => {
+  it("wraps static class methods via class init block", () => {
     const output = t(`class Svc {
-  update({ id, name }) { return id; }
+  static version() { return "1.0.0"; }
+}`);
+    expect(output).toContain("Object.getOwnPropertyDescriptor(this, \"version\")");
+    expect(output).toContain("__flightbox_wrap");
+  });
+
+  it("keeps fallback body rewrite for private methods", () => {
+    const output = t(`class Vault {
+  #read({ id }) { return id; }
+  get(data) { return this.#read(data); }
 }`);
     expect(output).toContain("__flightbox_wrap");
-    // Should fall back to .apply(this, arguments) for destructured params
+    // Private methods are not eligible for static-block patching.
     expect(output).toContain(".apply(this, arguments)");
   });
 
@@ -139,7 +150,8 @@ function b() { return 2; }
   *items() { yield 1; yield 2; }
 }`);
     expect(output).toContain("__flightbox_wrap");
-    expect(output).toContain("function*()");
+    expect(output).toContain("*items()");
+    expect(output).toContain("Object.getOwnPropertyDescriptor(this.prototype, \"items\")");
   });
 
   it("wraps class field arrow functions", () => {

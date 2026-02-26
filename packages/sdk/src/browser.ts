@@ -7,12 +7,38 @@
  * - JSON + WebSocket to Vite dev server (which writes Parquet)
  * - requestIdleCallback batching to avoid blocking frames
  */
-import { createSpan, completeSpan, failSpan } from "@flightbox/core";
+import { createSpan, completeSpan, failSpan, serialize } from "@flightbox/core";
 import type { Span, SpanMeta, SpanContext } from "@flightbox/core";
 
 // ── Call stack (single-threaded parent tracking) ──────────────────────
 
 const callStack: SpanContext[] = [];
+
+export type EntityAction = "create" | "update" | "delete" | "upsert" | "custom";
+
+export interface TrackEntityInput {
+  action: EntityAction;
+  entity_type: string;
+  entity_id?: string | number;
+  snapshot?: unknown;
+  changes?: unknown;
+  note?: string;
+  dimensions?: Record<string, string | number | boolean | null>;
+}
+
+interface EntityEvent {
+  action: EntityAction;
+  entity_type: string;
+  entity_id?: string;
+  snapshot?: string | null;
+  changes?: string | null;
+  note?: string;
+  dimensions?: Record<string, string | number | boolean | null>;
+  at: number;
+}
+
+const MAX_EVENTS_PER_SPAN = 200;
+const eventsBySpanId = new Map<string, EntityEvent[]>();
 
 // ── Config ────────────────────────────────────────────────────────────
 
@@ -103,6 +129,105 @@ function bufferSpan(span: Span): void {
   }
 }
 
+function beginEntityTracking(spanId: string): void {
+  eventsBySpanId.set(spanId, []);
+}
+
+function finalizeEntityTracking(span: Span): void {
+  const events = eventsBySpanId.get(span.span_id);
+  eventsBySpanId.delete(span.span_id);
+  if (!events || events.length === 0) return;
+
+  let base: Record<string, unknown> = {};
+  if (span.tags) {
+    try {
+      base = JSON.parse(span.tags) as Record<string, unknown>;
+    } catch {
+      base = {};
+    }
+  }
+
+  const existing = Array.isArray(base.entities) ? (base.entities as unknown[]) : [];
+  base.entities = [...existing, ...events];
+  span.tags = JSON.stringify(base);
+}
+
+export function trackEntity(input: TrackEntityInput): boolean {
+  const ctx = callStack[callStack.length - 1];
+  if (!ctx) return false;
+
+  const entityType = input.entity_type?.trim();
+  if (!entityType) return false;
+
+  let events = eventsBySpanId.get(ctx.span_id);
+  if (!events) {
+    events = [];
+    eventsBySpanId.set(ctx.span_id, events);
+  }
+
+  if (events.length >= MAX_EVENTS_PER_SPAN) return false;
+
+  events.push({
+    action: input.action,
+    entity_type: entityType,
+    entity_id: normalizeEntityId(input.entity_id),
+    snapshot: serializeField(input.snapshot),
+    changes: serializeField(input.changes),
+    note: normalizeNote(input.note),
+    dimensions: normalizeDimensions(input.dimensions),
+    at: Date.now(),
+  });
+
+  return true;
+}
+
+export function trackEntityCreate(
+  entityType: string,
+  entityId?: string | number,
+  snapshot?: unknown,
+  dimensions?: Record<string, string | number | boolean | null>,
+): boolean {
+  return trackEntity({
+    action: "create",
+    entity_type: entityType,
+    entity_id: entityId,
+    snapshot,
+    dimensions,
+  });
+}
+
+export function trackEntityUpdate(
+  entityType: string,
+  entityId?: string | number,
+  changes?: unknown,
+  snapshot?: unknown,
+  dimensions?: Record<string, string | number | boolean | null>,
+): boolean {
+  return trackEntity({
+    action: "update",
+    entity_type: entityType,
+    entity_id: entityId,
+    changes,
+    snapshot,
+    dimensions,
+  });
+}
+
+export function trackEntityDelete(
+  entityType: string,
+  entityId?: string | number,
+  snapshot?: unknown,
+  dimensions?: Record<string, string | number | boolean | null>,
+): boolean {
+  return trackEntity({
+    action: "delete",
+    entity_type: entityType,
+    entity_id: entityId,
+    snapshot,
+    dimensions,
+  });
+}
+
 function drainBuffer(): void {
   idleScheduled = false;
   if (buffer.length === 0) return;
@@ -133,6 +258,7 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
 
     const parent = callStack[callStack.length - 1] ?? undefined;
     const span = createSpan(meta, parent, args, this);
+    beginEntityTracking(span.span_id);
 
     const ctx: SpanContext = { trace_id: span.trace_id, span_id: span.span_id };
     callStack.push(ctx);
@@ -144,6 +270,7 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
       if (isGenerator) {
         callStack.pop();
         completeSpan(span, "[Generator]");
+        finalizeEntityTracking(span);
         bufferSpan(span);
         return result;
       }
@@ -153,12 +280,14 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
           (val) => {
             popContext(ctx);
             completeSpan(span, val);
+            finalizeEntityTracking(span);
             bufferSpan(span);
             return val;
           },
           (err) => {
             popContext(ctx);
             failSpan(span, err);
+            finalizeEntityTracking(span);
             bufferSpan(span);
             throw err;
           },
@@ -167,11 +296,13 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
 
       callStack.pop();
       completeSpan(span, result);
+      finalizeEntityTracking(span);
       bufferSpan(span);
       return result;
     } catch (err) {
       callStack.pop();
       failSpan(span, err);
+      finalizeEntityTracking(span);
       bufferSpan(span);
       throw err;
     }
@@ -195,6 +326,39 @@ function popContext(ctx: SpanContext): void {
       return;
     }
   }
+}
+
+function normalizeEntityId(
+  entityId: string | number | undefined,
+): string | undefined {
+  if (entityId === undefined || entityId === null) return undefined;
+  return String(entityId);
+}
+
+function normalizeNote(note: string | undefined): string | undefined {
+  if (!note) return undefined;
+  return note.length > 300 ? note.slice(0, 300) + "..." : note;
+}
+
+function normalizeDimensions(
+  dimensions: Record<string, string | number | boolean | null> | undefined,
+): Record<string, string | number | boolean | null> | undefined {
+  if (!dimensions) return undefined;
+  const out: Record<string, string | number | boolean | null> = {};
+  for (const [k, v] of Object.entries(dimensions)) {
+    out[k] = v;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function serializeField(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  return serialize(value, {
+    maxDepth: 3,
+    maxBreadth: 20,
+    maxStringLength: 256,
+    maxReprLength: 150,
+  });
 }
 
 // ── Auto-connect on import ────────────────────────────────────────────
