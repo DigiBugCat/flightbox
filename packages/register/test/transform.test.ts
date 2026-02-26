@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { transform } from "../src/index.js";
+import { transform } from "../src/transform.js";
 
 function t(code: string, filename = "src/app.ts"): string {
   const result = transform(code, filename);

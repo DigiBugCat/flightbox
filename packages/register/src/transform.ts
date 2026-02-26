@@ -4,6 +4,8 @@ import { walk } from "estree-walker";
 import MagicString from "magic-string";
 import picomatch from "picomatch";
 import type { Node } from "estree";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { inferName, extractParamNames } from "./names.js";
 
 export interface TransformOptions {
@@ -17,6 +19,47 @@ export interface TransformResult {
 }
 
 const TsParser = Parser.extend(tsPlugin());
+
+// Cache: directory path → package name (or null if no package.json found)
+const pkgNameCache = new Map<string, string | null>();
+
+/**
+ * Find the nearest package.json and return its `name` field.
+ * Cached per directory — one readFileSync per package, not per file.
+ */
+function getPackageName(filePath: string): string | null {
+  let dir = dirname(filePath);
+  const seen: string[] = [];
+
+  while (dir !== dirname(dir)) { // stop at filesystem root
+    if (pkgNameCache.has(dir)) {
+      const cached = pkgNameCache.get(dir)!;
+      // Backfill cache for intermediate dirs
+      for (const d of seen) pkgNameCache.set(d, cached);
+      return cached;
+    }
+    seen.push(dir);
+
+    try {
+      const raw = readFileSync(join(dir, "package.json"), "utf-8");
+      const name = (JSON.parse(raw) as { name?: string }).name ?? null;
+      for (const d of seen) pkgNameCache.set(d, name);
+      return name;
+    } catch {
+      // No package.json here, keep walking up
+    }
+    dir = dirname(dir);
+  }
+
+  // Hit filesystem root with no package.json
+  for (const d of seen) pkgNameCache.set(d, null);
+  return null;
+}
+
+function isFlightboxPackage(filePath: string): boolean {
+  const name = getPackageName(filePath);
+  return name !== null && name.startsWith("@flightbox/");
+}
 
 function buildMeta(name: string, filename: string, line: number): string {
   const escapedName = JSON.stringify(name);
@@ -42,19 +85,8 @@ export function createTransformer(options: TransformOptions = {}) {
     if (excludeMatcher(filename)) return null;
     if (!includeMatcher(filename)) return null;
 
-    // Skip flightbox SDK internals — files that define or re-export __flightbox_wrap,
-    // or files that are part of the @flightbox packages
-    if (
-      (code.includes("__flightbox_wrap") && (
-        code.includes("export function __flightbox_wrap") ||
-        code.includes("export { __flightbox_wrap") ||
-        code.includes("export const __flightbox_wrap")
-      )) ||
-      filename.includes("@flightbox/") ||
-      filename.includes("@flightbox%2F")
-    ) {
-      return null;
-    }
+    // Skip @flightbox/* packages — check nearest package.json
+    if (isFlightboxPackage(filename)) return null;
 
     let ast: Node;
     try {

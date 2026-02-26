@@ -1,4 +1,4 @@
-import { createTransformer } from "@flightbox/transform";
+import { createTransformer } from "./transform.js";
 import { transformSync } from "esbuild";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -14,14 +14,11 @@ const exclude = process.env.FLIGHTBOX_EXCLUDE?.split(",") ?? [
 
 const transform = createTransformer({ include, exclude });
 
-// Resolve @flightbox/sdk to its built dist/index.js
-// require.resolve may return src/index.ts due to export conditions, so we
-// find the package directory and use dist/index.js explicitly
+// Resolve @flightbox/sdk so injected imports can find it
 const require = createRequire(import.meta.url);
 let sdkUrl: string | null = null;
 try {
   const resolved = require.resolve("@flightbox/sdk");
-  // Strip /src/index.ts or /dist/index.js from the resolved path to get the package root
   const sdkRoot = resolved.replace(/\/(src|dist)\/index\.[jt]s$/, "");
   sdkUrl = pathToFileURL(sdkRoot + "/dist/index.js").href;
 } catch {
@@ -52,12 +49,8 @@ export async function resolve(
   context: ResolveContext,
   nextResolve: NextResolve,
 ): Promise<ResolveResult> {
-  // Help resolve @flightbox/sdk when it's injected by our transform
   if (specifier === "@flightbox/sdk" && sdkUrl) {
-    return {
-      url: sdkUrl,
-      shortCircuit: true,
-    };
+    return { url: sdkUrl, shortCircuit: true };
   }
   return nextResolve(specifier, context);
 }
@@ -81,15 +74,10 @@ export async function load(
 ): Promise<LoadResult> {
   if (!url.startsWith("file://")) return nextLoad(url, context);
   if (url.includes("/node_modules/")) return nextLoad(url, context);
-  // Skip flightbox's own packages
-  if (url.includes("/@flightbox/") || url.includes("/flightbox/packages/")) {
-    return nextLoad(url, context);
-  }
   if (!/\.[jt]sx?(\?|$)/.test(url)) return nextLoad(url, context);
 
   const filePath = fileURLToPath(url);
 
-  // Read raw source (including TS syntax)
   let source: string;
   try {
     source = readFileSync(filePath, "utf-8");
@@ -97,11 +85,11 @@ export async function load(
     return nextLoad(url, context);
   }
 
-  // Apply our transform (acorn-typescript handles TS syntax)
+  // Transform handles @flightbox/* exclusion via package.json lookup
   const transformed = transform(source, filePath);
   if (!transformed) return nextLoad(url, context);
 
-  // Strip TypeScript types using esbuild
+  // Strip TypeScript types
   const loader = getLoader(filePath);
   let jsCode = transformed.code;
   if (loader !== "js") {

@@ -66,30 +66,15 @@ importers:
       '@flightbox/sdk':
         specifier: workspace:*
         version: link:../sdk
-      '@flightbox/transform':
-        specifier: workspace:*
-        version: link:../transform
-      esbuild:
-        specifier: ^0.25.0
-        version: 0.25.12
-
-  packages/sdk:
-    dependencies:
-      '@duckdb/node-api':
-        specifier: 1.4.4-r.1
-        version: 1.4.4-r.1
-      '@flightbox/core':
-        specifier: workspace:*
-        version: link:../core
-
-  packages/transform:
-    dependencies:
       '@sveltejs/acorn-typescript':
         specifier: ^1.0.5
         version: 1.0.9(acorn@8.16.0)
       acorn:
         specifier: ^8.14.0
         version: 8.16.0
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
       estree-walker:
         specifier: ^3.0.3
         version: 3.0.3
@@ -107,11 +92,20 @@ importers:
         specifier: ^3.0.0
         version: 3.0.2
 
+  packages/sdk:
+    dependencies:
+      '@duckdb/node-api':
+        specifier: 1.4.4-r.1
+        version: 1.4.4-r.1
+      '@flightbox/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/unplugin:
     dependencies:
-      '@flightbox/transform':
+      '@flightbox/register':
         specifier: workspace:*
-        version: link:../transform
+        version: link:../register
       unplugin:
         specifier: ^2.3.0
         version: 2.3.11

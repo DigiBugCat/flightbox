@@ -44,7 +44,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@flightbox/transform": "workspace:*",
+    "@flightbox/register": "workspace:*",
     "unplugin": "^2.3.0"
   }
 }

@@ -9,7 +9,7 @@ export default defineConfig({
     alias: {
       "@flightbox/core": resolve(__dirname, "packages/core/src/index.ts"),
       "@flightbox/sdk": resolve(__dirname, "packages/sdk/src/index.ts"),
-      "@flightbox/transform": resolve(__dirname, "packages/transform/src/index.ts"),
+      "@flightbox/register": resolve(__dirname, "packages/register/src/index.ts"),
     },
   },
 });

@@ -25,7 +25,15 @@
   },
   "dependencies": {
     "@flightbox/sdk": "workspace:*",
-    "@flightbox/transform": "workspace:*",
+    "acorn": "^8.14.0",
+    "@sveltejs/acorn-typescript": "^1.0.5",
+    "estree-walker": "^3.0.3",
+    "magic-string": "^0.30.17",
+    "picomatch": "^4.0.0",
     "esbuild": "^0.25.0"
+  },
+  "devDependencies": {
+    "@types/picomatch": "^3.0.0",
+    "@types/estree": "^1.0.0"
   }
 }
