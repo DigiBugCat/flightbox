@@ -10,6 +10,7 @@ import {
   searchSchema,
   siblingsSchema,
   failingSchema,
+  querySchema,
   flightboxSummary,
   flightboxChildren,
   flightboxInspect,
@@ -17,6 +18,7 @@ import {
   flightboxSearch,
   flightboxSiblings,
   flightboxFailing,
+  flightboxQuery,
 } from "./tools.js";
 
 const server = new McpServer({
@@ -97,6 +99,21 @@ server.tool(
   async (params) => ({
     content: [
       { type: "text", text: JSON.stringify(await flightboxFailing(params), null, 2) },
+    ],
+  }),
+);
+
+server.tool(
+  "flightbox_query",
+  "Run arbitrary DuckDB SQL against the spans table. Use `spans` as the table name. " +
+  "Supports JSON_EXTRACT_STRING(input, '$.path') for digging into serialized args/returns, " +
+  "aggregations, window functions, CTEs — full DuckDB SQL. " +
+  "Use this for ad-hoc analysis like grouping by extracted fields, finding hot paths, " +
+  "comparing entity performance, etc.",
+  querySchema.shape,
+  async (params) => ({
+    content: [
+      { type: "text", text: JSON.stringify(await flightboxQuery(params), null, 2) },
     ],
   }),
 );

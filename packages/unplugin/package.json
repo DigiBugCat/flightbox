@@ -44,7 +44,14 @@
     "build": "tsc"
   },
   "dependencies": {
+    "@flightbox/core": "workspace:*",
     "@flightbox/register": "workspace:*",
+    "@duckdb/node-api": "1.4.4-r.1",
+    "ws": "^8.18.0",
     "unplugin": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.13",
+    "vite": "^6.3.0"
   }
 }

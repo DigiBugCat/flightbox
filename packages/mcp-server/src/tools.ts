@@ -352,6 +352,36 @@ export async function flightboxFailing(
   }));
 }
 
+// ─── Raw SQL Query ───
+
+export const querySchema = z.object({
+  sql: z.string().describe(
+    "SQL query against the spans table. Use `spans` as the table name. " +
+    "Columns: span_id, trace_id, parent_id, kind, name, module, file_line, " +
+    "input (JSON string), output (JSON string), error (JSON string), " +
+    "started_at (BIGINT epoch ms), ended_at (BIGINT epoch ms), duration_ms (DOUBLE), " +
+    "git_sha, tags. " +
+    "DuckDB SQL — supports JSON_EXTRACT_STRING(input, '$[0].id'), aggregations, window functions, etc. " +
+    "Example: SELECT name, COUNT(*) as calls, AVG(duration_ms) as avg_ms FROM spans GROUP BY name ORDER BY avg_ms DESC LIMIT 20",
+  ),
+});
+
+export async function flightboxQuery(
+  params: z.infer<typeof querySchema>,
+) {
+  // Replace `spans` table reference with the parquet glob read
+  const glob = `'${getTracesDir()}/*.parquet'`;
+  const parquetFrom = `read_parquet(${glob}, union_by_name=true)`;
+  const sql = params.sql.replace(/\bspans\b/gi, parquetFrom);
+
+  try {
+    const rows = await query(sql);
+    return { rows, count: rows.length };
+  } catch (err) {
+    return { error: String(err) };
+  }
+}
+
 // ─── Helpers ───
 
 async function resolveAncestors(
