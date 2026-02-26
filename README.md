@@ -40,7 +40,7 @@ There's no daemon. The SDK writes Parquet files to a directory. The MCP server r
 
 ### 1. Instrument your app
 
-**Option A: Loader hook (recommended)** — works with tsx, ts-node, plain node. Zero config.
+**Option A: Loader hook (Node.js, recommended)** — works with tsx, ts-node, plain node. Zero config.
 
 ```bash
 npm install @flightbox/register @flightbox/sdk
@@ -54,19 +54,44 @@ tsx --import @flightbox/register ./src/index.ts
 
 Every function in your code gets instrumented automatically. No Babel, no build config.
 
-**Option B: Build plugin** — works with Vite, webpack, esbuild, Rollup.
+**Option B: Vite plugin (browser + Node)** — auto-instruments your code and captures browser traces via WebSocket.
+
+```bash
+npm install @flightbox/unplugin @flightbox/sdk
+```
+
+```ts
+// vite.config.ts
+import flightbox from '@flightbox/unplugin/vite'
+
+export default {
+  plugins: [flightbox()],
+}
+```
+
+This does three things:
+1. **Transforms** your code to wrap functions with tracing (same AST transform as the loader hook)
+2. **Aliases** `@flightbox/sdk` → `@flightbox/sdk/browser` so the browser gets a lightweight SDK (no DuckDB, no Node APIs)
+3. **Starts a WebSocket collector** on the Vite dev server (`/__flightbox`) that receives spans from the browser and writes Parquet files
+
+Browser spans use `requestIdleCallback` to batch and send traces during idle time — no frame drops even at 60fps with hundreds of entities.
+
+**Option C: Other bundlers** — webpack, esbuild, Rollup (transform only, no browser collection).
 
 ```bash
 npm install @flightbox/unplugin @flightbox/sdk
 ```
 
 ```js
-// vite.config.ts
-import flightbox from '@flightbox/unplugin/vite'
-export default { plugins: [flightbox()] }
+// webpack
+import flightbox from '@flightbox/unplugin/webpack'
+// esbuild
+import flightbox from '@flightbox/unplugin/esbuild'
+// rollup
+import flightbox from '@flightbox/unplugin/rollup'
 ```
 
-**Option C: Babel plugin** — if you already use Babel.
+**Option D: Babel plugin** — if you already use Babel.
 
 ```js
 // babel.config.js
@@ -124,9 +149,34 @@ const processOrder = __flightbox_wrap(
 )
 ```
 
+### Node.js
+
 **`@flightbox/sdk`** — The runtime. `__flightbox_wrap` records a span for each function call — what went in, what came out (or what error was thrown), how long it took, and who the parent was. Uses `AsyncLocalStorage` for context propagation so nested calls form a tree. Buffers spans in memory and flushes to Parquet periodically or on process exit. Auto-starts on import — no bootstrap needed.
 
-**`@flightbox/mcp-server`** — Exposes 7 tools over MCP:
+### Browser
+
+**`@flightbox/sdk/browser`** — Same `__flightbox_wrap` interface but browser-compatible. Uses an array-based call stack instead of `AsyncLocalStorage` (browser JS is single-threaded). Batches spans and sends them as JSON over WebSocket during `requestIdleCallback` — never during a frame.
+
+The Vite plugin receives these spans on the dev server and writes them to the same `~/.flightbox/traces/` directory as Node spans. The MCP server reads them identically — it doesn't know or care whether a span came from Node or a browser.
+
+```
+Browser (main thread)              Vite dev server            MCP server
+  │                                    │                         │
+  │ wrapped fn runs → span recorded    │                         │
+  │ buffer.push(span)                  │                         │
+  │   ...more functions...             │                         │
+  │ requestIdleCallback fires          │                         │
+  │   JSON.stringify(batch)            │                         │
+  │   ws.send(json) ──────────────────→│ JSON.parse              │
+  │                                    │ batch append (DuckDB)   │
+  │                                    │ every 500ms:            │
+  │                                    │   flush → .parquet      │
+  │                                    │   ~/.flightbox/traces/  │──→ queries
+```
+
+## MCP tools
+
+**`@flightbox/mcp-server`** — Exposes 8 tools over MCP:
 
 | Tool | What it does |
 |------|-------------|
@@ -137,6 +187,27 @@ const processOrder = __flightbox_wrap(
 | `flightbox_search` | Find spans by function name, text in args/output/errors, duration, etc. |
 | `flightbox_siblings` | Everything that ran under the same parent, in execution order. |
 | `flightbox_failing` | Recent errors, grouped by error type. |
+| `flightbox_query` | Raw DuckDB SQL against spans. Full power — aggregations, JSON extraction, window functions. |
+
+### Raw SQL queries
+
+`flightbox_query` lets the LLM write arbitrary DuckDB SQL against a `spans` table. This is how you do ad-hoc analysis that the structured tools don't cover:
+
+```sql
+-- Which functions are called most often?
+SELECT name, COUNT(*) as calls, AVG(duration_ms) as avg_ms
+FROM spans GROUP BY name ORDER BY calls DESC LIMIT 20
+
+-- Extract entity IDs from serialized args
+SELECT JSON_EXTRACT_STRING(input, '$[0].id') as entity_id,
+       AVG(duration_ms) as avg_ms, MAX(duration_ms) as max_ms
+FROM spans WHERE name = 'update'
+GROUP BY entity_id ORDER BY avg_ms DESC
+
+-- Find the slowest trace
+SELECT trace_id, SUM(duration_ms) as total_ms, COUNT(*) as span_count
+FROM spans GROUP BY trace_id ORDER BY total_ms DESC LIMIT 5
+```
 
 ## Configuration
 
@@ -169,7 +240,7 @@ configure({
 |---------|------|-----|
 | `@flightbox/register` | Node.js loader hook | [![npm](https://img.shields.io/npm/v/@flightbox/register)](https://www.npmjs.com/package/@flightbox/register) |
 | `@flightbox/unplugin` | Build plugin (Vite/webpack/esbuild/Rollup) | [![npm](https://img.shields.io/npm/v/@flightbox/unplugin)](https://www.npmjs.com/package/@flightbox/unplugin) |
-| `@flightbox/sdk` | Runtime SDK | [![npm](https://img.shields.io/npm/v/@flightbox/sdk)](https://www.npmjs.com/package/@flightbox/sdk) |
+| `@flightbox/sdk` | Runtime SDK (Node + browser) | [![npm](https://img.shields.io/npm/v/@flightbox/sdk)](https://www.npmjs.com/package/@flightbox/sdk) |
 | `@flightbox/transform` | Shared AST transform | [![npm](https://img.shields.io/npm/v/@flightbox/transform)](https://www.npmjs.com/package/@flightbox/transform) |
 | `@flightbox/mcp-server` | MCP query tools | [![npm](https://img.shields.io/npm/v/@flightbox/mcp-server)](https://www.npmjs.com/package/@flightbox/mcp-server) |
 | `@flightbox/core` | Shared types & serializer | [![npm](https://img.shields.io/npm/v/@flightbox/core)](https://www.npmjs.com/package/@flightbox/core) |
@@ -179,7 +250,7 @@ configure({
 
 Each function call produces a span:
 
-- **span_id / trace_id / parent_id** — the DAG structure
+- **span_id / trace_id / parent_id** — the call tree structure
 - **name, module, file_line** — where in your code
 - **input** — JSON-serialized arguments (depth-limited, truncated)
 - **output** — JSON-serialized return value
