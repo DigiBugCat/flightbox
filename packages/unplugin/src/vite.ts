@@ -1,5 +1,6 @@
 import { unplugin } from "./index.js";
 import { DuckDBInstance } from "@duckdb/node-api";
+import type { DuckDBConnection } from "@duckdb/node-api";
 import type { Span } from "@flightbox/core";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -36,8 +37,9 @@ class ParquetWriter {
   private ready: Promise<void>;
   private buffer: Span[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private flushing = false;
   private counter = 0;
-  private instance: InstanceType<typeof DuckDBInstance> | null = null;
+  private conn: DuckDBConnection | null = null;
 
   constructor(private tracesDir: string) {
     mkdirSync(tracesDir, { recursive: true });
@@ -45,9 +47,9 @@ class ParquetWriter {
   }
 
   private async init(): Promise<void> {
-    this.instance = await DuckDBInstance.create(":memory:");
-    const conn = await this.instance.connect();
-    await conn.run(SCHEMA_SQL);
+    const instance = await DuckDBInstance.create(":memory:");
+    this.conn = await instance.connect();
+    await this.conn.run(SCHEMA_SQL);
 
     this.flushTimer = setInterval(() => void this.flush(), FLUSH_INTERVAL_MS);
   }
@@ -60,16 +62,16 @@ class ParquetWriter {
   }
 
   private async flush(): Promise<void> {
-    if (this.buffer.length === 0 || !this.instance) return;
+    if (this.buffer.length === 0 || this.flushing) return;
     await this.ready;
+    if (!this.conn) return;
 
+    this.flushing = true;
     const batch = this.buffer;
     this.buffer = [];
 
-    const conn = await this.instance.connect();
-
     try {
-      const appender = await conn.createAppender("spans");
+      const appender = await this.conn.createAppender("spans");
 
       for (const s of batch) {
         appender.appendVarchar(s.span_id);
@@ -96,14 +98,16 @@ class ParquetWriter {
       const filename = `${Date.now()}-browser-${this.counter++}.parquet`;
       const filepath = join(this.tracesDir, filename);
 
-      await conn.run(
+      await this.conn.run(
         `COPY spans TO '${filepath.replace(/'/g, "''")}' (FORMAT PARQUET)`,
       );
-      await conn.run("DELETE FROM spans");
+      await this.conn.run("DELETE FROM spans");
     } catch (err) {
       if (process.env.FLIGHTBOX_DEBUG) {
         console.error("[flightbox] parquet flush error:", err);
       }
+    } finally {
+      this.flushing = false;
     }
   }
 
