@@ -36,9 +36,37 @@ Your app (instrumented)          Claude / any MCP client
 
 There's no daemon. The SDK writes Parquet files to a directory. The MCP server reads them with DuckDB. They never talk to each other — they share a filesystem.
 
-## How it works
+## Quick start
 
-**`@flightbox/babel-plugin`** — A Babel transform that wraps your functions with instrumentation. You configure which files to include/exclude with globs.
+### 1. Instrument your app
+
+**Option A: Loader hook (recommended)** — works with tsx, ts-node, plain node. Zero config.
+
+```bash
+npm install @flightbox/register @flightbox/sdk
+node --import @flightbox/register ./src/index.ts
+```
+
+Or with tsx:
+```bash
+tsx --import @flightbox/register ./src/index.ts
+```
+
+Every function in your code gets instrumented automatically. No Babel, no build config.
+
+**Option B: Build plugin** — works with Vite, webpack, esbuild, Rollup.
+
+```bash
+npm install @flightbox/unplugin @flightbox/sdk
+```
+
+```js
+// vite.config.ts
+import flightbox from '@flightbox/unplugin/vite'
+export default { plugins: [flightbox()] }
+```
+
+**Option C: Babel plugin** — if you already use Babel.
 
 ```js
 // babel.config.js
@@ -50,7 +78,31 @@ plugins: [
 ]
 ```
 
-This turns:
+### 2. Add the MCP server
+
+```json
+{
+  "mcpServers": {
+    "flightbox": {
+      "command": "npx",
+      "args": ["@flightbox/mcp-server"]
+    }
+  }
+}
+```
+
+### 3. Run your app, then ask questions
+
+Run your app normally. When something breaks, ask the LLM:
+
+> "Why did checkout fail?"
+
+It will use the MCP tools to find the error, trace the call chain, and inspect the arguments that caused the problem.
+
+## How it works
+
+The instrumentation turns this:
+
 ```js
 function processOrder(order) {
   const validated = validate(order)
@@ -59,6 +111,7 @@ function processOrder(order) {
 ```
 
 Into (roughly):
+
 ```js
 import { __flightbox_wrap } from '@flightbox/sdk'
 
@@ -71,17 +124,7 @@ const processOrder = __flightbox_wrap(
 )
 ```
 
-**`@flightbox/sdk`** — The runtime. `__flightbox_wrap` records a span for each function call — what went in, what came out (or what error was thrown), how long it took, and who the parent was. Uses `AsyncLocalStorage` for context propagation so nested calls form a tree. Buffers spans in memory and flushes to Parquet periodically or on process exit.
-
-```ts
-import { configure, startFlushing } from '@flightbox/sdk'
-
-configure({
-  enabled: true,
-  tracesDir: '~/.flightbox/traces',
-})
-startFlushing()
-```
+**`@flightbox/sdk`** — The runtime. `__flightbox_wrap` records a span for each function call — what went in, what came out (or what error was thrown), how long it took, and who the parent was. Uses `AsyncLocalStorage` for context propagation so nested calls form a tree. Buffers spans in memory and flushes to Parquet periodically or on process exit. Auto-starts on import — no bootstrap needed.
 
 **`@flightbox/mcp-server`** — Exposes 7 tools over MCP:
 
@@ -95,26 +138,42 @@ startFlushing()
 | `flightbox_siblings` | Everything that ran under the same parent, in execution order. |
 | `flightbox_failing` | Recent errors, grouped by error type. |
 
-Add to Claude Code:
-```json
-{
-  "mcpServers": {
-    "flightbox": {
-      "command": "npx",
-      "args": ["@flightbox/mcp-server"]
-    }
-  }
-}
+## Configuration
+
+The loader hook and unplugin work with zero config by default. To customize:
+
+**Loader hook** — env vars:
+```bash
+FLIGHTBOX_INCLUDE="src/**/*.ts" FLIGHTBOX_EXCLUDE="**/*.test.ts" node --import @flightbox/register ./app.ts
+```
+
+**Unplugin** — options:
+```js
+flightbox({ include: ["src/**/*.ts"], exclude: ["**/*.test.ts"] })
+```
+
+**SDK** — optional, for advanced use:
+```ts
+import { configure } from '@flightbox/sdk'
+
+configure({
+  enabled: true,
+  tracesDir: '~/.flightbox/traces',
+  flushIntervalMs: 5000,
+})
 ```
 
 ## Packages
 
-| Package | npm |
-|---------|-----|
-| `@flightbox/core` | [![npm](https://img.shields.io/npm/v/@flightbox/core)](https://www.npmjs.com/package/@flightbox/core) |
-| `@flightbox/sdk` | [![npm](https://img.shields.io/npm/v/@flightbox/sdk)](https://www.npmjs.com/package/@flightbox/sdk) |
-| `@flightbox/babel-plugin` | [![npm](https://img.shields.io/npm/v/@flightbox/babel-plugin)](https://www.npmjs.com/package/@flightbox/babel-plugin) |
-| `@flightbox/mcp-server` | [![npm](https://img.shields.io/npm/v/@flightbox/mcp-server)](https://www.npmjs.com/package/@flightbox/mcp-server) |
+| Package | What | npm |
+|---------|------|-----|
+| `@flightbox/register` | Node.js loader hook | [![npm](https://img.shields.io/npm/v/@flightbox/register)](https://www.npmjs.com/package/@flightbox/register) |
+| `@flightbox/unplugin` | Build plugin (Vite/webpack/esbuild/Rollup) | [![npm](https://img.shields.io/npm/v/@flightbox/unplugin)](https://www.npmjs.com/package/@flightbox/unplugin) |
+| `@flightbox/sdk` | Runtime SDK | [![npm](https://img.shields.io/npm/v/@flightbox/sdk)](https://www.npmjs.com/package/@flightbox/sdk) |
+| `@flightbox/transform` | Shared AST transform | [![npm](https://img.shields.io/npm/v/@flightbox/transform)](https://www.npmjs.com/package/@flightbox/transform) |
+| `@flightbox/mcp-server` | MCP query tools | [![npm](https://img.shields.io/npm/v/@flightbox/mcp-server)](https://www.npmjs.com/package/@flightbox/mcp-server) |
+| `@flightbox/core` | Shared types & serializer | [![npm](https://img.shields.io/npm/v/@flightbox/core)](https://www.npmjs.com/package/@flightbox/core) |
+| `@flightbox/babel-plugin` | Babel transform (legacy) | [![npm](https://img.shields.io/npm/v/@flightbox/babel-plugin)](https://www.npmjs.com/package/@flightbox/babel-plugin) |
 
 ## What gets captured
 
