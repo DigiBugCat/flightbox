@@ -12,7 +12,7 @@ The issue isn't that the LLM can't debug — it's that it can't *see*. It wrote 
 
 ## What Flightbox does
 
-Flightbox records function execution — arguments, return values, errors, timing, and parent-child relationships — and writes it to Parquet files. An MCP server reads those files and exposes tools that let an LLM walk the execution trace.
+Flightbox records function execution — arguments, return values, errors, timing, parent-child relationships, and object state — then writes it to Parquet files. An MCP server reads those files and exposes tools that let an LLM walk the execution trace.
 
 No reproduction needed. The LLM doesn't have to guess what happened. It can look.
 
@@ -69,10 +69,17 @@ export default {
 }
 ```
 
-This does three things:
-1. **Transforms** your code to wrap functions with tracing (same AST transform as the loader hook)
-2. **Aliases** `@flightbox/sdk` → `@flightbox/sdk/browser` so the browser gets a lightweight SDK (no DuckDB, no Node APIs)
-3. **Starts a WebSocket collector** on the Vite dev server (`/__flightbox`) that receives spans from the browser and writes Parquet files
+This does four things:
+1. **Scopes** instrumentation to recently changed files via `git diff` — only traces code in your blast radius
+2. **Transforms** those files to wrap functions with tracing
+3. **Aliases** `@flightbox/sdk` → `@flightbox/sdk/browser` so the browser gets a lightweight SDK
+4. **Starts a WebSocket collector** on the Vite dev server that writes browser spans to Parquet
+
+You can also add explicit includes alongside the git-based scoping:
+
+```ts
+flightbox({ include: ['**/renderer/**'] })
+```
 
 Browser spans use `requestIdleCallback` to batch and send traces during idle time — no frame drops even at 60fps with hundreds of entities.
 
@@ -208,14 +215,45 @@ GROUP BY entity_id ORDER BY avg_ms DESC
 SELECT trace_id, SUM(duration_ms) as total_ms, COUNT(*) as span_count
 FROM spans GROUP BY trace_id ORDER BY total_ms DESC LIMIT 5
 
--- Track mutable object state across frames (context = serialized `this`)
+-- Track object state changes across frames
 SELECT name,
        JSON_EXTRACT_STRING(context, '$.pathProgress') as progress,
        JSON_EXTRACT_STRING(context, '$.currentX') as x,
        duration_ms
 FROM spans WHERE name = 'updateAgents'
 ORDER BY started_at DESC LIMIT 20
+
+-- Find when a path rebuilds (detect interpolation stutters)
+WITH ordered AS (
+  SELECT input, started_at,
+    LAG(input) OVER (ORDER BY started_at) as prev_input
+  FROM spans WHERE name = 'buildPixelPath'
+)
+SELECT input, prev_input, started_at
+FROM ordered WHERE input != prev_input
+ORDER BY started_at DESC LIMIT 10
 ```
+
+## What gets captured
+
+Each function call produces a span:
+
+- **span_id / trace_id / parent_id** — the call tree structure
+- **name, module, file_line** — where in your code
+- **input** — JSON-serialized arguments (depth-limited, truncated)
+- **output** — JSON-serialized return value
+- **error** — JSON-serialized error with stack trace
+- **context** — JSON-serialized `this` for class methods (depth 1, primitives prioritized). `null` for non-method calls.
+- **started_at / ended_at / duration_ms** — timing
+- **git_sha** — which commit
+
+### Serialization
+
+Serialization is depth-limited (5 levels), breadth-limited (10 complex values per object/array), and string-truncated (512 chars). Circular references are detected. Primitive values (strings, numbers, booleans) are always included regardless of the breadth limit — only objects and arrays count against it. This ensures class state like `pathProgress`, `currentX` aren't crowded out by framework internals.
+
+### Git-scoped instrumentation
+
+The Vite plugin automatically detects recently changed files via `git diff --name-only HEAD~5 HEAD` and only instruments those files. This keeps traces focused on your active work and avoids instrumenting hot-path utility functions in unchanged code. You can extend the scope with explicit `include` patterns.
 
 ## Configuration
 
@@ -249,25 +287,9 @@ configure({
 | `@flightbox/register` | Node.js loader hook | [![npm](https://img.shields.io/npm/v/@flightbox/register)](https://www.npmjs.com/package/@flightbox/register) |
 | `@flightbox/unplugin` | Build plugin (Vite/webpack/esbuild/Rollup) | [![npm](https://img.shields.io/npm/v/@flightbox/unplugin)](https://www.npmjs.com/package/@flightbox/unplugin) |
 | `@flightbox/sdk` | Runtime SDK (Node + browser) | [![npm](https://img.shields.io/npm/v/@flightbox/sdk)](https://www.npmjs.com/package/@flightbox/sdk) |
-| `@flightbox/transform` | Shared AST transform | [![npm](https://img.shields.io/npm/v/@flightbox/transform)](https://www.npmjs.com/package/@flightbox/transform) |
 | `@flightbox/mcp-server` | MCP query tools | [![npm](https://img.shields.io/npm/v/@flightbox/mcp-server)](https://www.npmjs.com/package/@flightbox/mcp-server) |
 | `@flightbox/core` | Shared types & serializer | [![npm](https://img.shields.io/npm/v/@flightbox/core)](https://www.npmjs.com/package/@flightbox/core) |
 | `@flightbox/babel-plugin` | Babel transform (legacy) | [![npm](https://img.shields.io/npm/v/@flightbox/babel-plugin)](https://www.npmjs.com/package/@flightbox/babel-plugin) |
-
-## What gets captured
-
-Each function call produces a span:
-
-- **span_id / trace_id / parent_id** — the call tree structure
-- **name, module, file_line** — where in your code
-- **input** — JSON-serialized arguments (depth-limited, truncated)
-- **output** — JSON-serialized return value
-- **error** — JSON-serialized error with stack trace
-- **context** — JSON-serialized `this` for class methods (depth 1 — primitives captured, nested objects truncated). `null` for non-method calls.
-- **started_at / ended_at / duration_ms** — timing
-- **git_sha** — which commit
-
-Serialization is depth-limited (5 levels), breadth-limited (10 items per object/array), and string-truncated (512 chars). Circular references are detected. The goal is capturing enough for an LLM to reason about, not perfect fidelity.
 
 ## License
 
