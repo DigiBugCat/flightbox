@@ -22,7 +22,7 @@ export function createSpan(
     input: serialize(args),
     output: null,
     error: null,
-    context: context !== undefined ? serialize(context, { maxDepth: 3 }) : null,
+    context: context !== undefined ? serialize(context, { maxDepth: 1 }) : null,
     started_at: Date.now(),
     ended_at: null,
     duration_ms: null,

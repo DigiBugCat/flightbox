@@ -204,6 +204,12 @@ export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
           }
         });
 
+        ws.on("error", (err) => {
+          if (process.env.FLIGHTBOX_DEBUG) {
+            console.error("[flightbox] ws error:", err.message);
+          }
+        });
+
         ws.on("close", () => {
           if (process.env.FLIGHTBOX_DEBUG) {
             console.log("[flightbox] browser disconnected");
