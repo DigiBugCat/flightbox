@@ -176,7 +176,7 @@ export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
     configureServer(server) {
       const writer = new ParquetWriter(tracesDir);
 
-      const wss = new WebSocketServer({ noServer: true });
+      const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 * 1024 });
 
       server.httpServer?.on("upgrade", (req: any, socket: any, head: any) => {
         if (req.url === "/__flightbox") {

@@ -79,11 +79,19 @@ function scheduleReconnect(): void {
 
 // ── Span buffer + idle flush ──────────────────────────────────────────
 
+const MAX_BATCH_SIZE = 500;
+
 let buffer: Span[] = [];
 let idleScheduled = false;
 
 function bufferSpan(span: Span): void {
   buffer.push(span);
+
+  // Force drain if batch is getting large
+  if (buffer.length >= MAX_BATCH_SIZE) {
+    drainBuffer();
+    return;
+  }
 
   if (!idleScheduled) {
     idleScheduled = true;
