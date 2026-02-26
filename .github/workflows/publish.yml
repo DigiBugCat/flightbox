@@ -21,22 +21,23 @@ jobs:
       - run: pnpm install
       - run: pnpm -r build
 
+      # pnpm publish replaces workspace:* with real versions
       - name: Publish @flightbox/core
-        run: cd packages/core && npm publish --access public
+        run: cd packages/core && pnpm publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @flightbox/sdk
-        run: cd packages/sdk && npm publish --access public
+        run: cd packages/sdk && pnpm publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @flightbox/babel-plugin
-        run: cd packages/babel-plugin && npm publish --access public
+        run: cd packages/babel-plugin && pnpm publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @flightbox/mcp-server
-        run: cd packages/mcp-server && npm publish --access public
+        run: cd packages/mcp-server && pnpm publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

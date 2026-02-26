@@ -1,6 +1,6 @@
 {
   "name": "@flightbox/mcp-server",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "MCP server for querying Flightbox trace data",
   "type": "module",
   "main": "dist/index.js",
@@ -15,7 +15,10 @@
       "default": "./src/index.ts"
     }
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src"
+  ],
   "license": "MIT",
   "publishConfig": {
     "access": "public"
