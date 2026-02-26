@@ -207,6 +207,14 @@ GROUP BY entity_id ORDER BY avg_ms DESC
 -- Find the slowest trace
 SELECT trace_id, SUM(duration_ms) as total_ms, COUNT(*) as span_count
 FROM spans GROUP BY trace_id ORDER BY total_ms DESC LIMIT 5
+
+-- Track mutable object state across frames (context = serialized `this`)
+SELECT name,
+       JSON_EXTRACT_STRING(context, '$.pathProgress') as progress,
+       JSON_EXTRACT_STRING(context, '$.currentX') as x,
+       duration_ms
+FROM spans WHERE name = 'updateAgents'
+ORDER BY started_at DESC LIMIT 20
 ```
 
 ## Configuration
@@ -255,6 +263,7 @@ Each function call produces a span:
 - **input** — JSON-serialized arguments (depth-limited, truncated)
 - **output** — JSON-serialized return value
 - **error** — JSON-serialized error with stack trace
+- **context** — JSON-serialized `this` for class methods (depth 1 — primitives captured, nested objects truncated). `null` for non-method calls.
 - **started_at / ended_at / duration_ms** — timing
 - **git_sha** — which commit
 
