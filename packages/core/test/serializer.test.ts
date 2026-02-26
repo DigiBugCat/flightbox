@@ -60,12 +60,19 @@ describe("serialize", () => {
     expect(parsed[5]).toBe("... 15 more");
   });
 
-  it("limits object breadth", () => {
-    const obj: Record<string, number> = {};
-    for (let i = 0; i < 20; i++) obj[`key${i}`] = i;
+  it("limits object breadth for complex values only", () => {
+    // Primitives are unlimited — only complex values count against breadth
+    const obj: Record<string, unknown> = {};
+    for (let i = 0; i < 5; i++) obj[`prim${i}`] = i;
+    for (let i = 0; i < 10; i++) obj[`obj${i}`] = { nested: true };
     const parsed = JSON.parse(serialize(obj, { maxBreadth: 3 })!);
     const keys = Object.keys(parsed);
-    expect(keys).toHaveLength(4); // 3 + overflow
+    // 5 primitives (all included) + 3 complex (breadth limit) + overflow marker
+    expect(keys).toHaveLength(9);
+    expect(parsed.prim0).toBe(0);
+    expect(parsed.prim4).toBe(4);
+    expect(parsed.obj0).toEqual({ nested: true });
+    expect(parsed["... 7 more"]).toBe("...");
   });
 
   it("limits depth", () => {

@@ -118,29 +118,27 @@ function serializeValue(
     return { __type: "Set", values: items };
   }
 
-  // Plain objects — primitives first so they aren't pushed out by breadth limit
+  // Plain objects — all primitives included, only complex values count against breadth
   const result: Record<string, unknown> = {};
-  const allKeys = Object.keys(obj);
+  const keys = Object.keys(obj);
   const record = obj as Record<string, unknown>;
-  const keys = allKeys.sort((a, b) => {
-    const aObj = record[a] !== null && typeof record[a] === "object";
-    const bObj = record[b] !== null && typeof record[b] === "object";
-    if (aObj === bObj) return 0;
-    return aObj ? 1 : -1;
-  });
-  const limit = Math.min(keys.length, opts.maxBreadth);
+  let complexCount = 0;
 
-  for (let i = 0; i < limit; i++) {
-    result[keys[i]] = serializeValue(
-      record[keys[i]],
-      depth - 1,
-      opts,
-      seen,
-    );
+  for (const key of keys) {
+    const val = record[key];
+    const isComplex = val !== null && typeof val === "object" || typeof val === "function";
+
+    if (isComplex) {
+      if (complexCount >= opts.maxBreadth) continue;
+      complexCount++;
+    }
+
+    result[key] = serializeValue(val, depth - 1, opts, seen);
   }
 
-  if (keys.length > opts.maxBreadth) {
-    result[`... ${keys.length - opts.maxBreadth} more`] = "...";
+  const skipped = keys.length - Object.keys(result).length;
+  if (skipped > 0) {
+    result[`... ${skipped} more`] = "...";
   }
 
   seen.delete(obj);
