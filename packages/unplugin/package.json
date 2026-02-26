@@ -1,6 +1,6 @@
 {
   "name": "@flightbox/unplugin",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Universal build plugin for Flightbox auto-instrumentation (Vite, webpack, esbuild, Rollup)",
   "type": "module",
   "main": "dist/index.js",
