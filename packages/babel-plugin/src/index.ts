@@ -133,9 +133,7 @@ export default function flightboxBabelPlugin(
       },
 
       "ArrowFunctionExpression|FunctionExpression"(
-        path: NodePath<
-          BabelTypes.ArrowFunctionExpression | BabelTypes.FunctionExpression
-        >,
+        path: NodePath<BabelTypes.Node>,
         state: PluginState,
       ) {
         if (!state.shouldInstrument) return;
@@ -150,15 +148,16 @@ export default function flightboxBabelPlugin(
           return;
         }
 
+        const fnNode = path.node as BabelTypes.ArrowFunctionExpression | BabelTypes.FunctionExpression;
         const name = getFunctionName(path as NodePath<BabelTypes.Function>);
-        const line = path.node.loc?.start.line;
+        const line = fnNode.loc?.start.line;
         const programPath = path.findParent((p) =>
           p.isProgram(),
         ) as NodePath<BabelTypes.Program>;
         ensureImport(programPath, state);
 
         const wrapped = buildWrapCall(
-          path.node,
+          fnNode,
           name,
           state.filename,
           line,
@@ -181,9 +180,12 @@ export default function flightboxBabelPlugin(
         ) as NodePath<BabelTypes.Program>;
         ensureImport(programPath, state);
 
+        const params = path.node.params.filter(
+          (p): p is BabelTypes.FunctionParameter => !t.isTSParameterProperty(p),
+        );
         const funcExpr = t.functionExpression(
           null,
-          path.node.params,
+          params,
           path.node.body,
           path.node.generator,
           path.node.async,
@@ -192,7 +194,7 @@ export default function flightboxBabelPlugin(
         const wrapped = buildWrapCall(funcExpr, name, state.filename, line);
 
         // Build args list from params
-        const args: BabelTypes.Expression[] = path.node.params.map((p) => {
+        const args: BabelTypes.Expression[] = params.map((p) => {
           if (t.isIdentifier(p)) return t.cloneNode(p);
           if (t.isAssignmentPattern(p) && t.isIdentifier(p.left))
             return t.cloneNode(p.left);

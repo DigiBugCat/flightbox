@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "flightbox": {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "/Users/andrew.sulistio/cassandra-toolkit-dev/spectrace/packages/mcp-server/src/index.ts"
+      ]
+    }
+  }
+}
