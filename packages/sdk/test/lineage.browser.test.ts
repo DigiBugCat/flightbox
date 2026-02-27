@@ -36,13 +36,13 @@ describe("lineage helpers (browser)", () => {
     mod.configure({
       enabled: true,
       blastScopeId: "scope-browser",
-      entityCatalog: { types: ["PAWN"] },
+      objectCatalog: { types: ["PAWN"] },
       lineage: { requireBlastScope: true, messageKey: "_fb", maxHops: 2 },
     } as any);
 
     const wrapped = mod.__flightbox_wrap(
       function sendPawnDelta() {
-        mod.trackEntityUpdate("PAWN", "pawn-7", { hp: { from: 10, to: 8 } });
+        mod.trackObjectUpdate("PAWN", "pawn-7", { hp: { from: 10, to: 8 } });
         return mod.withLineage({ kind: "delta" });
       },
       { name: "sendPawnDelta", module: "test.ts", line: 1 },
@@ -54,7 +54,7 @@ describe("lineage helpers (browser)", () => {
     expect(lineage.trace_id).toEqual(expect.any(String));
     expect(lineage.span_id).toEqual(expect.any(String));
     expect(lineage.blast_scope_id).toBe("scope-browser");
-    expect(lineage.subject_entity).toMatchObject({ type: "PAWN", id: "pawn-7" });
+    expect(lineage.subject_object).toMatchObject({ type: "PAWN", id: "pawn-7" });
   });
 
   it("runWithLineage injects remote context and restores afterwards", async () => {
@@ -65,7 +65,7 @@ describe("lineage helpers (browser)", () => {
       _fb: {
         trace_id: "trace-remote",
         span_id: "span-remote",
-        subject_entity: { type: "PAWN", id: "pawn-2" },
+        subject_object: { type: "PAWN", id: "pawn-2" },
         actor_system: "server#broadcast",
         hop: 0,
         max_hops: 2,

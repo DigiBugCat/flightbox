@@ -147,7 +147,7 @@ AND CAST(json_extract_string(json_each.value, '$.span_id') AS VARCHAR) != ''
 `;
 }
 
-export function entityEventsViewSql(where?: string): string {
+export function objectEventsViewSql(where?: string): string {
   const clauses = [
     `spans.tags_json IS NOT NULL`,
   ];
@@ -158,8 +158,8 @@ SELECT
   spans.trace_id,
   spans.started_at AS event_at,
   CAST(json_extract_string(json_each.value, '$.action') AS VARCHAR) AS action,
-  CAST(json_extract_string(json_each.value, '$.entity_type') AS VARCHAR) AS entity_type,
-  CAST(json_extract_string(json_each.value, '$.entity_id') AS VARCHAR) AS entity_id,
+  CAST(json_extract_string(json_each.value, '$.object_type') AS VARCHAR) AS object_type,
+  CAST(json_extract_string(json_each.value, '$.object_id') AS VARCHAR) AS object_id,
   CAST(json_extract_string(json_each.value, '$.snapshot') AS VARCHAR) AS snapshot,
   CAST(json_extract_string(json_each.value, '$.changes') AS VARCHAR) AS changes,
   CAST(json_extract_string(json_each.value, '$.note') AS VARCHAR) AS note,
@@ -170,10 +170,10 @@ FROM (
     TRY_CAST(tags AS JSON) AS tags_json
   FROM read_parquet(${parquetGlob()}, union_by_name=true)
 ) AS spans,
-LATERAL json_each(COALESCE(json_extract(spans.tags_json, '$.entities'), '[]'))
+LATERAL json_each(COALESCE(json_extract(spans.tags_json, '$.objects'), '[]'))
 WHERE ${clauses.join(" AND ")}
 AND CAST(json_extract_string(json_each.value, '$.action') AS VARCHAR) IS NOT NULL
-AND CAST(json_extract_string(json_each.value, '$.entity_type') AS VARCHAR) IS NOT NULL
+AND CAST(json_extract_string(json_each.value, '$.object_type') AS VARCHAR) IS NOT NULL
 `;
 }
 
@@ -190,13 +190,13 @@ ${lineageEdgesViewSql(where)}
 }
 
 interface FlightboxManifest {
-  declared_entity_types?: unknown;
+  declared_object_types?: unknown;
 }
 
-export function getConfiguredEntityTypes(): string[] {
-  const envRaw = process.env.FLIGHTBOX_ENTITY_TYPES;
+export function getConfiguredObjectTypes(): string[] {
+  const envRaw = process.env.FLIGHTBOX_OBJECT_TYPES;
   if (envRaw) {
-    const parsed = parseEntityTypes(envRaw);
+    const parsed = parseObjectTypes(envRaw);
     if (parsed.length > 0) return parsed;
   }
 
@@ -206,22 +206,22 @@ export function getConfiguredEntityTypes(): string[] {
   try {
     const raw = readFileSync(manifestPath, "utf8");
     const parsed = JSON.parse(raw) as FlightboxManifest;
-    return normalizeEntityTypes(parsed.declared_entity_types);
+    return normalizeObjectTypes(parsed.declared_object_types);
   } catch {
     return [];
   }
 }
 
-function parseEntityTypes(raw: string): string[] {
+function parseObjectTypes(raw: string): string[] {
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return normalizeEntityTypes(parsed);
+    return normalizeObjectTypes(parsed);
   } catch {
-    return normalizeEntityTypes(raw.split(","));
+    return normalizeObjectTypes(raw.split(","));
   }
 }
 
-function normalizeEntityTypes(input: unknown): string[] {
+function normalizeObjectTypes(input: unknown): string[] {
   if (!Array.isArray(input)) return [];
   return [...new Set(
     input

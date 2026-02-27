@@ -8,19 +8,19 @@ describe("lineage helpers (node)", () => {
   it("withLineage emits metadata when tracked entities are touched", async () => {
     const { __flightbox_wrap } = await import("../src/wrap.js");
     const { configure } = await import("../src/config.js");
-    const { trackEntityUpdate } = await import("../src/entity.js");
+    const { trackObjectUpdate } = await import("../src/object.js");
     const { withLineage } = await import("../src/lineage.js");
 
     configure({
       enabled: true,
       blastScopeId: "scope-node",
-      entityCatalog: { types: ["PAWN"] },
+      objectCatalog: { types: ["PAWN"] },
       lineage: { requireBlastScope: true, messageKey: "_fb", maxHops: 2 },
     });
 
     const wrapped = __flightbox_wrap(
       function sendPawnDelta() {
-        trackEntityUpdate("PAWN", "pawn-1", { hp: { from: 10, to: 7 } });
+        trackObjectUpdate("PAWN", "pawn-1", { hp: { from: 10, to: 7 } });
         return withLineage({ kind: "delta" });
       },
       { name: "sendPawnDelta", module: "test.ts", line: 1 },
@@ -32,10 +32,10 @@ describe("lineage helpers (node)", () => {
     expect(lineage.trace_id).toEqual(expect.any(String));
     expect(lineage.span_id).toEqual(expect.any(String));
     expect(lineage.blast_scope_id).toBe("scope-node");
-    expect(lineage.subject_entity).toMatchObject({ type: "PAWN", id: "pawn-1" });
+    expect(lineage.subject_object).toMatchObject({ type: "PAWN", id: "pawn-1" });
   });
 
-  it("withLineage is a no-op when no tracked entity was touched", async () => {
+  it("withLineage is a no-op when no tracked object was touched", async () => {
     const { __flightbox_wrap } = await import("../src/wrap.js");
     const { configure } = await import("../src/config.js");
     const { withLineage } = await import("../src/lineage.js");
@@ -43,15 +43,15 @@ describe("lineage helpers (node)", () => {
     configure({
       enabled: true,
       blastScopeId: "scope-node",
-      entityCatalog: { types: ["PAWN"] },
+      objectCatalog: { types: ["PAWN"] },
       lineage: { requireBlastScope: true, messageKey: "_fb", maxHops: 2 },
     });
 
     const wrapped = __flightbox_wrap(
-      function sendWithoutEntity() {
+      function sendWithoutObject() {
         return withLineage({ kind: "delta" });
       },
-      { name: "sendWithoutEntity", module: "test.ts", line: 1 },
+      { name: "sendWithoutObject", module: "test.ts", line: 1 },
     );
 
     expect(wrapped()).toEqual({ kind: "delta" });
@@ -71,7 +71,7 @@ describe("lineage helpers (node)", () => {
       _fb: {
         trace_id: "trace-remote",
         span_id: "span-remote",
-        subject_entity: { type: "PAWN", id: "pawn-2" },
+        subject_object: { type: "PAWN", id: "pawn-2" },
         actor_system: "server#broadcast",
         hop: 0,
         max_hops: 2,

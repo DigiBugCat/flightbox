@@ -12,7 +12,7 @@ The issue isn't that the LLM can't debug — it's that it can't *see*. It wrote 
 
 ## What Flightbox does
 
-Flightbox records function execution — arguments, return values, errors, timing, parent-child relationships, and object state — then writes it to Parquet files. An MCP server reads those files and exposes tools that let an LLM walk the execution trace, detect patterns, and track entity state changes.
+Flightbox records function execution — arguments, return values, errors, timing, parent-child relationships, and object state — then writes it to Parquet files. An MCP server reads those files and exposes tools that let an LLM walk the execution trace, detect patterns, and track object state changes.
 
 No reproduction needed. The LLM doesn't have to guess what happened. It can look.
 
@@ -63,7 +63,7 @@ export default {
   plugins: [
     flightbox({
       include: ['**/renderer/**'],
-      entities: { types: ['AGENT', 'ROOM', 'ITEM'] },
+      objects: { types: ['AGENT', 'ROOM', 'ITEM'] },
       lineage: { maxHops: 2 },
     }),
   ],
@@ -112,41 +112,41 @@ It will use the MCP tools to find the error, trace the call chain, and inspect t
 
 ## Wiring guide
 
-Flightbox instruments functions automatically, but to get the most out of it you'll want to wire up three things: **entity tracking**, **annotations**, and **cross-boundary lineage**.
+Flightbox instruments functions automatically, but to get the most out of it you'll want to wire up three things: **object tracking**, **annotations**, and **cross-boundary lineage**.
 
-### Entity tracking
+### Object tracking
 
 When your code creates, updates, or deletes domain entities, annotate those mutation points:
 
 ```ts
 import {
-  trackEntityCreate,
-  trackEntityUpdate,
-  trackEntityDelete,
+  trackObjectCreate,
+  trackObjectUpdate,
+  trackObjectDelete,
 } from '@flightbox/sdk'
 
 // On entity creation — pass the full snapshot
-trackEntityCreate('AGENT', agent.id, agent)
+trackObjectCreate('AGENT', agent.id, agent)
 
 // On entity update — pass the current state as snapshot
 // The MCP server computes diffs automatically via LAG() at query time
-trackEntityUpdate('AGENT', agent.id, undefined, {
+trackObjectUpdate('AGENT', agent.id, undefined, {
   x: agent.position.x,
   y: agent.position.y,
   state: agent.state,
 })
 
 // If you already have a diff (e.g. from ECS dirty tracking), pass it as changes
-trackEntityUpdate('AGENT', agent.id, {
+trackObjectUpdate('AGENT', agent.id, {
   position: { from: { x: 61, y: 54 }, to: { x: 61, y: 55 } },
   state: { from: 'MOVING', to: 'IDLE' },
 })
 
 // On entity deletion
-trackEntityDelete('AGENT', agent.id, agent)
+trackObjectDelete('AGENT', agent.id, agent)
 ```
 
-Signature: `trackEntityUpdate(entityType, entityId?, changes?, snapshot?, dimensions?)`
+Signature: `trackObjectUpdate(entityType, entityId?, changes?, snapshot?, dimensions?)`
 
 - **snapshot**: The current state of the entity. Stored as-is. The MCP server computes `{field: {from, to}}` diffs between consecutive snapshots at query time — you don't need to compute diffs yourself.
 - **changes**: Optional explicit diff if you already have one. Takes priority over snapshot-based diffs when present.
@@ -155,7 +155,7 @@ Signature: `trackEntityUpdate(entityType, entityId?, changes?, snapshot?, dimens
 This gives the MCP server structured entity timelines:
 
 ```
-flightbox_entity_timeline(entity_type: "AGENT", entity_id: "marcus", field_filter: "position")
+flightbox_object_timeline(object_type: "AGENT", object_id: "marcus", field_filter: "position")
 
 → [
     { at: 1772150100, action: "update",
@@ -227,7 +227,7 @@ runWithLineage(msg, () => {
 ```
 
 Lineage attachment requires:
-1. Current span must have touched a tracked entity type.
+1. Current span must have touched a tracked object type.
 2. If `lineage.requireBlastScope=true` (default), current span must be in blast scope.
 3. Missing or invalid lineage is a safe no-op — never breaks your code.
 
@@ -250,12 +250,12 @@ Lineage attachment requires:
 | `flightbox_siblings` | Everything that ran under the same parent, in execution order. |
 | `flightbox_failing` | Recent errors, grouped by error type. |
 
-### Entity tracking
+### Object tracking
 
 | Tool | What it does |
 |------|-------------|
-| `flightbox_entities` | Entity-level summary with coverage report (configured vs observed types). |
-| `flightbox_entity_timeline` | Time-ordered entity mutations with snapshots, computed diffs, span anchors, and cross-process links. Supports `field_filter` to narrow to specific field changes. |
+| `flightbox_objects` | Object-level summary with coverage report (configured vs observed types). |
+| `flightbox_object_timeline` | Time-ordered object mutations with snapshots, computed diffs, span anchors, and cross-process links. Supports `field_filter` to narrow to specific field changes. |
 
 ### Pattern detection
 
@@ -264,7 +264,7 @@ Lineage attachment requires:
 | `flightbox_hotspots` | Functions called most frequently. Finds spam calls and hot loops. |
 | `flightbox_input_stability` | Functions called repeatedly with identical input. Finds wasted work. |
 | `flightbox_intervals` | Timing between consecutive calls. Detects tick rate mismatches. |
-| `flightbox_oscillation` | Detects values ping-ponging between states (A→B→A→B). Works on entity snapshots or raw span inputs. |
+| `flightbox_oscillation` | Detects values ping-ponging between states (A→B→A→B). Works on object snapshots or raw span inputs. |
 
 ### Raw SQL
 
@@ -283,10 +283,10 @@ This is the actual workflow that diagnosed a pawn oscillation bug in a game:
 2. flightbox_input_stability(name_pattern: "buildPixelPath", last_n_minutes: 1)
    → Same input repeated 27 times — pathChanged firing when nothing changed
 
-3. flightbox_entity_timeline(entity_type: "AGENT", entity_id: "marcus", field_filter: "position")
+3. flightbox_object_timeline(object_type: "AGENT", object_id: "marcus", field_filter: "position")
    → Position alternating between y=54 and y=55 every few frames
 
-4. flightbox_oscillation(entity_type: "AGENT", field_path: "position.y")
+4. flightbox_oscillation(object_type: "AGENT", field_path: "position.y")
    → Marcus flagged with 24 flip events — server reassigning jobs that bounce him
 
 5. flightbox_walk(span_id: <mutation_span>, direction: "up")
@@ -325,7 +325,7 @@ Each function call produces a span:
 - **output** — JSON-serialized return value
 - **error** — JSON-serialized error with stack trace
 - **context** — JSON-serialized `this` for class methods (depth 1, primitives prioritized). `null` for non-method calls.
-- **tags** — structured metadata: entity mutations, lineage send/recv, blast scope, annotations
+- **tags** — structured metadata: object mutations, lineage send/recv, blast scope, annotations
 - **started_at / ended_at / duration_ms** — timing
 - **git_sha** — which commit
 
@@ -351,7 +351,7 @@ FLIGHTBOX_EXCLUDE="**/*.test.ts" node --import @flightbox/register ./app.ts
 flightbox({
   include: ['**/renderer/**'],
   exclude: ['**/test/**'],
-  entities: { types: ['AGENT', 'ROOM', 'ITEM'] },
+  objects: { types: ['AGENT', 'ROOM', 'ITEM'] },
   lineage: { maxHops: 2 },
 })
 ```
@@ -365,7 +365,7 @@ configure({
   enabled: true,
   tracesDir: '~/.flightbox/traces',
   flushIntervalMs: 5000,
-  entityCatalog: { types: ['AGENT', 'ROOM'] },
+  objectCatalog: { types: ['AGENT', 'ROOM'] },
   lineage: {
     maxHops: 2,
     requireBlastScope: true,

@@ -1,7 +1,7 @@
 // Thin re-export for backward compatibility — actual implementation in causality.ts
 export type {
   LineageEvidenceKind,
-  LineageSubjectEntity,
+  LineageSubjectObject,
   LineagePayload,
 } from "./causality.js";
 export { withLineage, runWithLineage } from "./wrap.js";

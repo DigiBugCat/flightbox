@@ -2,7 +2,7 @@ import { createUnplugin } from "unplugin";
 import { createTransformer, type TransformOptions } from "@flightbox/register";
 
 export interface FlightboxPluginOptions extends TransformOptions {
-  entities?: {
+  objects?: {
     types?: string[];
   };
   lineage?: {

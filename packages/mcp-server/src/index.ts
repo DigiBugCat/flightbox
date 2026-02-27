@@ -11,8 +11,8 @@ import {
   recentSchema,
   siblingsSchema,
   failingSchema,
-  entitiesSchema,
-  entityTimelineSchema,
+  objectsSchema,
+  objectTimelineSchema,
   querySchema,
   hotspotsSchema,
   inputStabilitySchema,
@@ -26,8 +26,8 @@ import {
   flightboxRecent,
   flightboxSiblings,
   flightboxFailing,
-  flightboxEntities,
-  flightboxEntityTimeline,
+  flightboxObjects,
+  flightboxObjectTimeline,
   flightboxQuery,
   flightboxHotspots,
   flightboxInputStability,
@@ -129,25 +129,25 @@ server.tool(
 );
 
 server.tool(
-  "flightbox_entities",
-  "Summarize tracked entity activity by type/id. Use this to see created/updated/deleted entities (for example PAWN) over time windows.",
-  entitiesSchema.shape,
+  "flightbox_objects",
+  "Summarize tracked object activity by type/id. Use this to see created/updated/deleted objects (for example PAWN) over time windows.",
+  objectsSchema.shape,
   async (params) => ({
     content: [
-      { type: "text", text: JSON.stringify(await flightboxEntities(params), null, 2) },
+      { type: "text", text: JSON.stringify(await flightboxObjects(params), null, 2) },
     ],
   }),
 );
 
 server.tool(
-  "flightbox_entity_timeline",
-  "Timeline for one entity type (and optional id), including span anchors so you can walk the call graph around each entity mutation. " +
+  "flightbox_object_timeline",
+  "Timeline for one entity type (and optional id), including span anchors so you can walk the call graph around each object mutation. " +
   "Returns snapshot data and computed diffs between consecutive snapshots. " +
   "Use field_filter to narrow to events where a specific field changed (e.g. 'position', 'state').",
-  entityTimelineSchema.shape,
+  objectTimelineSchema.shape,
   async (params) => ({
     content: [
-      { type: "text", text: JSON.stringify(await flightboxEntityTimeline(params), null, 2) },
+      { type: "text", text: JSON.stringify(await flightboxObjectTimeline(params), null, 2) },
     ],
   }),
 );
@@ -206,7 +206,7 @@ server.tool(
 server.tool(
   "flightbox_oscillation",
   "Detect values that ping-pong between states (A→B→A→B). Works in two modes: " +
-  "(1) Entity mode: provide entity_type + field_path to check entity snapshot fields. " +
+  "(1) Object mode: provide entity_type + field_path to check entity snapshot fields. " +
   "(2) Span mode: provide span_name + input_path to check raw function inputs. " +
   "Use to find state machine bugs, infinite loops, and flip-flop conditions.",
   oscillationSchema.shape,

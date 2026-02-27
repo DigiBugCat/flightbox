@@ -2,7 +2,7 @@
  * Shared causality primitives — environment-agnostic.
  *
  * Node provides ALS-based ContextProvider, browser provides callStack-based.
- * All entity tracking, lineage propagation, and wrap logic lives here.
+ * All object tracking, lineage propagation, and wrap logic lives here.
  */
 import { createSpan, completeSpan, failSpan, serialize } from "@flightbox/core";
 import type { Span, SpanContext, SpanMeta } from "@flightbox/core";
@@ -14,22 +14,22 @@ export interface ContextProvider {
   inject<T>(context: SpanContext, fn: () => T): T;
 }
 
-export type EntityAction = "create" | "update" | "delete" | "upsert" | "custom";
+export type ObjectAction = "create" | "update" | "delete" | "upsert" | "custom";
 
-export interface TrackEntityInput {
-  action: EntityAction;
-  entity_type: string;
-  entity_id?: string | number;
+export interface TrackObjectInput {
+  action: ObjectAction;
+  object_type: string;
+  object_id?: string | number;
   snapshot?: unknown;
   changes?: unknown;
   note?: string;
   dimensions?: Record<string, string | number | boolean | null>;
 }
 
-export interface EntityEvent {
-  action: EntityAction;
-  entity_type: string;
-  entity_id?: string;
+export interface ObjectEvent {
+  action: ObjectAction;
+  object_type: string;
+  object_id?: string;
   snapshot?: string | null;
   changes?: string | null;
   note?: string;
@@ -39,7 +39,7 @@ export interface EntityEvent {
 
 export type LineageEvidenceKind = "exact" | "inferred" | "gap";
 
-export interface LineageSubjectEntity {
+export interface LineageSubjectObject {
   type: string;
   id?: string;
 }
@@ -47,7 +47,7 @@ export interface LineageSubjectEntity {
 export interface LineagePayload {
   trace_id: string;
   span_id: string;
-  subject_entity: LineageSubjectEntity;
+  subject_object: LineageSubjectObject;
   actor_system: string;
   hop: number;
   max_hops: number;
@@ -68,7 +68,7 @@ export interface CausalityConfig {
   enabled: boolean;
   blastScopeId: string | null;
   gitSha: string | null;
-  entityCatalog: { types: string[] };
+  objectCatalog: { types: string[] };
   lineage: {
     maxHops: number;
     requireBlastScope: boolean;
@@ -76,20 +76,20 @@ export interface CausalityConfig {
   };
 }
 
-// ── Entity Store ─────────────────────────────────────────────────────
+// ── Object Store ─────────────────────────────────────────────────────
 
 const MAX_EVENTS_PER_SPAN = 200;
 
-export interface EntityStore {
+export interface ObjectStore {
   beginTracking(spanId: string): void;
   finalizeTracking(span: Span): void;
-  selectTrackedEntity(spanId: string, trackedTypes: string[]): LineageSubjectEntity | undefined;
-  trackEvent(spanId: string, input: TrackEntityInput): boolean;
-  getEvents(spanId: string): EntityEvent[];
+  selectTrackedObject(spanId: string, trackedTypes: string[]): LineageSubjectObject | undefined;
+  trackEvent(spanId: string, input: TrackObjectInput): boolean;
+  getEvents(spanId: string): ObjectEvent[];
 }
 
-export function createEntityStore(): EntityStore {
-  const eventsBySpanId = new Map<string, EntityEvent[]>();
+export function createObjectStore(): ObjectStore {
+  const eventsBySpanId = new Map<string, ObjectEvent[]>();
 
   return {
     beginTracking(spanId: string): void {
@@ -102,27 +102,27 @@ export function createEntityStore(): EntityStore {
       if (!events || events.length === 0) return;
 
       const base = parseTags(span.tags);
-      const existing = Array.isArray(base.entities) ? (base.entities as unknown[]) : [];
-      base.entities = [...existing, ...events];
+      const existing = Array.isArray(base.objects) ? (base.objects as unknown[]) : [];
+      base.objects = [...existing, ...events];
       span.tags = JSON.stringify(base);
     },
 
-    selectTrackedEntity(spanId: string, trackedTypes: string[]): LineageSubjectEntity | undefined {
+    selectTrackedObject(spanId: string, trackedTypes: string[]): LineageSubjectObject | undefined {
       const events = eventsBySpanId.get(spanId);
       if (!events || events.length === 0) return undefined;
 
       const whitelist = new Set(trackedTypes);
       for (let i = events.length - 1; i >= 0; i--) {
         const ev = events[i];
-        if (whitelist.size > 0 && !whitelist.has(ev.entity_type)) continue;
-        return { type: ev.entity_type, id: ev.entity_id };
+        if (whitelist.size > 0 && !whitelist.has(ev.object_type)) continue;
+        return { type: ev.object_type, id: ev.object_id };
       }
       return undefined;
     },
 
-    trackEvent(spanId: string, input: TrackEntityInput): boolean {
-      const entityType = input.entity_type?.trim();
-      if (!entityType) return false;
+    trackEvent(spanId: string, input: TrackObjectInput): boolean {
+      const objectType = input.object_type?.trim();
+      if (!objectType) return false;
 
       let events = eventsBySpanId.get(spanId);
       if (!events) {
@@ -133,8 +133,8 @@ export function createEntityStore(): EntityStore {
 
       events.push({
         action: input.action,
-        entity_type: entityType,
-        entity_id: normalizeEntityId(input.entity_id),
+        object_type: objectType,
+        object_id: normalizeObjectId(input.object_id),
         snapshot: serializeField(input.snapshot),
         changes: serializeField(input.changes),
         note: normalizeNote(input.note),
@@ -144,7 +144,7 @@ export function createEntityStore(): EntityStore {
       return true;
     },
 
-    getEvents(spanId: string): EntityEvent[] {
+    getEvents(spanId: string): ObjectEvent[] {
       return [...(eventsBySpanId.get(spanId) ?? [])];
     },
   };
@@ -270,7 +270,7 @@ const DEFAULT_KEY = "_fb";
 export function createLineageHelpers(
   provider: ContextProvider,
   lineageStore: LineageStore,
-  entityStore: EntityStore,
+  objectStore: ObjectStore,
   getConfig: () => CausalityConfig,
 ) {
   function withLineage<T extends Record<string, unknown>>(
@@ -290,13 +290,13 @@ export function createLineageHelpers(
       return payload;
     }
 
-    const subject = entityStore.selectTrackedEntity(ctx.span_id, cfg.entityCatalog.types);
+    const subject = objectStore.selectTrackedObject(ctx.span_id, cfg.objectCatalog.types);
     if (!subject) return payload;
 
     const lineage: LineagePayload = {
       trace_id: ctx.trace_id,
       span_id: ctx.span_id,
-      subject_entity: subject,
+      subject_object: subject,
       actor_system: lineageStore.getActorSystem(ctx.span_id),
       hop: lineageStore.getInboundHop(ctx.span_id),
       max_hops: cfg.lineage.maxHops,
@@ -323,7 +323,7 @@ export function createLineageHelpers(
         lineageStore.recordRecv(active.span_id, {
           trace_id: active.trace_id,
           span_id: active.span_id,
-          subject_entity: { type: "UNKNOWN" },
+          subject_object: { type: "UNKNOWN" },
           actor_system: lineageStore.getActorSystem(active.span_id),
           hop: 0,
           max_hops: cfg.lineage.maxHops,
@@ -357,7 +357,7 @@ export function createLineageHelpers(
 
 export function createWrap(
   provider: ContextProvider,
-  entityStore: EntityStore,
+  objectStore: ObjectStore,
   lineageStore: LineageStore,
   getConfig: () => CausalityConfig,
   bufferSpan: (span: Span) => void,
@@ -378,7 +378,7 @@ export function createWrap(
       const span = createSpan(meta, parent, args, this);
       span.git_sha = cfg.gitSha;
       stampBlastScope(span, cfg.blastScopeId);
-      entityStore.beginTracking(span.span_id);
+      objectStore.beginTracking(span.span_id);
       lineageStore.beginTracking(span.span_id, `${span.module}#${span.name}`);
       annotationStore?.begin(span.span_id);
 
@@ -391,7 +391,7 @@ export function createWrap(
           if (isGenerator) {
             completeSpan(span, "[Generator]");
             annotationStore?.finalize(span);
-            entityStore.finalizeTracking(span);
+            objectStore.finalizeTracking(span);
             lineageStore.finalizeTracking(span);
             bufferSpan(span);
             return result;
@@ -401,14 +401,14 @@ export function createWrap(
             return (result as Promise<unknown>).then(
               (val) => {
                 completeSpan(span, val);
-                entityStore.finalizeTracking(span);
+                objectStore.finalizeTracking(span);
                 lineageStore.finalizeTracking(span);
                 bufferSpan(span);
                 return val;
               },
               (err) => {
                 failSpan(span, err);
-                entityStore.finalizeTracking(span);
+                objectStore.finalizeTracking(span);
                 lineageStore.finalizeTracking(span);
                 bufferSpan(span);
                 throw err;
@@ -418,14 +418,14 @@ export function createWrap(
 
           completeSpan(span, result);
           annotationStore?.finalize(span);
-          entityStore.finalizeTracking(span);
+          objectStore.finalizeTracking(span);
           lineageStore.finalizeTracking(span);
           bufferSpan(span);
           return result;
         } catch (err) {
           failSpan(span, err);
           annotationStore?.finalize(span);
-          entityStore.finalizeTracking(span);
+          objectStore.finalizeTracking(span);
           lineageStore.finalizeTracking(span);
           bufferSpan(span);
           throw err;
@@ -439,41 +439,41 @@ export function createWrap(
   };
 }
 
-// ── Entity Tracking Convenience ──────────────────────────────────────
+// ── Object Tracking Convenience ──────────────────────────────────────
 
-export function createEntityTrackers(
+export function createObjectTrackers(
   provider: ContextProvider,
-  entityStore: EntityStore,
+  objectStore: ObjectStore,
 ) {
-  function trackEntity(input: TrackEntityInput): boolean {
+  function trackObject(input: TrackObjectInput): boolean {
     const ctx = provider.extract();
     if (!ctx) return false;
-    return entityStore.trackEvent(ctx.span_id, input);
+    return objectStore.trackEvent(ctx.span_id, input);
   }
 
-  function trackEntityCreate(
-    entityType: string, entityId?: string | number,
+  function trackObjectCreate(
+    objectType: string, objectId?: string | number,
     snapshot?: unknown, dimensions?: Record<string, string | number | boolean | null>,
   ): boolean {
-    return trackEntity({ action: "create", entity_type: entityType, entity_id: entityId, snapshot, dimensions });
+    return trackObject({ action: "create", object_type: objectType, object_id: objectId, snapshot, dimensions });
   }
 
-  function trackEntityUpdate(
-    entityType: string, entityId?: string | number,
+  function trackObjectUpdate(
+    objectType: string, objectId?: string | number,
     changes?: unknown, snapshot?: unknown,
     dimensions?: Record<string, string | number | boolean | null>,
   ): boolean {
-    return trackEntity({ action: "update", entity_type: entityType, entity_id: entityId, changes, snapshot, dimensions });
+    return trackObject({ action: "update", object_type: objectType, object_id: objectId, changes, snapshot, dimensions });
   }
 
-  function trackEntityDelete(
-    entityType: string, entityId?: string | number,
+  function trackObjectDelete(
+    objectType: string, objectId?: string | number,
     snapshot?: unknown, dimensions?: Record<string, string | number | boolean | null>,
   ): boolean {
-    return trackEntity({ action: "delete", entity_type: entityType, entity_id: entityId, snapshot, dimensions });
+    return trackObject({ action: "delete", object_type: objectType, object_id: objectId, snapshot, dimensions });
   }
 
-  return { trackEntity, trackEntityCreate, trackEntityUpdate, trackEntityDelete };
+  return { trackObject, trackObjectCreate, trackObjectUpdate, trackObjectDelete };
 }
 
 // ── Annotate Factory ─────────────────────────────────────────────────
@@ -506,7 +506,7 @@ function parseLineage(payload: unknown, key: string): LineagePayload | undefined
   const hop = raw.hop;
   const maxHops = raw.max_hops;
   const blastScopeId = raw.blast_scope_id;
-  const subject = raw.subject_entity;
+  const subject = raw.subject_object;
 
   if (typeof traceId !== "string" || traceId.length === 0) return undefined;
   if (typeof spanId !== "string" || spanId.length === 0) return undefined;
@@ -520,7 +520,7 @@ function parseLineage(payload: unknown, key: string): LineagePayload | undefined
   return {
     trace_id: traceId,
     span_id: spanId,
-    subject_entity: {
+    subject_object: {
       type: subject.type,
       id: typeof subject.id === "string" ? subject.id : undefined,
     },
@@ -545,9 +545,9 @@ export function parseTags(raw: string | null): Record<string, unknown> {
   }
 }
 
-function normalizeEntityId(entityId: string | number | undefined): string | undefined {
-  if (entityId === undefined || entityId === null) return undefined;
-  return String(entityId);
+function normalizeObjectId(objectId: string | number | undefined): string | undefined {
+  if (objectId === undefined || objectId === null) return undefined;
+  return String(objectId);
 }
 
 function normalizeNote(note: string | undefined): string | undefined {

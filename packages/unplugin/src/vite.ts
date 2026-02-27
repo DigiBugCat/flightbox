@@ -151,7 +151,7 @@ interface FlightboxManifest {
   include_patterns: string[];
   env_include_patterns: string[];
   env_only_patterns: string[];
-  declared_entity_types: string[];
+  declared_object_types: string[];
   lineage: {
     max_hops: number;
     require_blast_scope: true;
@@ -161,13 +161,13 @@ interface FlightboxManifest {
 
 function computeBlastScopeId(
   includePatterns: string[],
-  entityTypes: string[],
+  objectTypes: string[],
   maxHops: number,
 ): string {
   const hash = createHash("sha1")
     .update(JSON.stringify({
       includePatterns: [...includePatterns].sort(),
-      entityTypes: [...entityTypes].sort(),
+      objectTypes: [...objectTypes].sort(),
       maxHops,
     }))
     .digest("hex");
@@ -178,10 +178,10 @@ function computeBlastScopeId(
 
 export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
   const tracesDir = join(homedir(), ".flightbox", "traces");
-  const declaredEntityTypes = [...new Set(
-    (options?.entities?.types ?? [])
-      .map((t) => t.trim())
-      .filter((t) => t.length > 0),
+  const declaredObjectTypes: string[] = [...new Set(
+    (options?.objects?.types ?? [] as string[])
+      .map((t: string) => t.trim())
+      .filter((t: string) => t.length > 0),
   )];
   const maxHops = Math.max(1, Math.floor(options?.lineage?.maxHops ?? 2));
 
@@ -203,7 +203,7 @@ export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
     mergedInclude = [...gitPatterns, ...userInclude, ...envInclude];
   }
 
-  const blastScopeId = computeBlastScopeId(mergedInclude, declaredEntityTypes, maxHops);
+  const blastScopeId = computeBlastScopeId(mergedInclude, declaredObjectTypes, maxHops);
 
   const parts: string[] = [];
   if (envOnly.length > 0) {
@@ -237,7 +237,7 @@ export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
         },
         define: {
           __FLIGHTBOX_BLAST_SCOPE_ID__: JSON.stringify(blastScopeId),
-          __FLIGHTBOX_ENTITY_TYPES__: JSON.stringify(declaredEntityTypes),
+          __FLIGHTBOX_OBJECT_TYPES__: JSON.stringify(declaredObjectTypes),
         },
       };
     },
@@ -245,7 +245,7 @@ export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
     configureServer(server) {
       const writer = new ParquetWriter(tracesDir);
       process.env.FLIGHTBOX_BLAST_SCOPE_ID = blastScopeId;
-      process.env.FLIGHTBOX_ENTITY_TYPES = JSON.stringify(declaredEntityTypes);
+      process.env.FLIGHTBOX_OBJECT_TYPES = JSON.stringify(declaredObjectTypes);
 
       const manifest: FlightboxManifest = {
         generated_at: new Date().toISOString(),
@@ -253,7 +253,7 @@ export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
         include_patterns: mergedInclude,
         env_include_patterns: envInclude,
         env_only_patterns: envOnly,
-        declared_entity_types: declaredEntityTypes,
+        declared_object_types: declaredObjectTypes,
         lineage: {
           max_hops: maxHops,
           require_blast_scope: true,

@@ -5,9 +5,9 @@ import {
   fromSpansInline,
   countSpans,
   getTracesDir,
-  getConfiguredEntityTypes,
+  getConfiguredObjectTypes,
   causalEdgesViewSql,
-  entityEventsViewSql,
+  objectEventsViewSql,
 } from "./db.js";
 
 // Helper to escape SQL string values
@@ -26,10 +26,10 @@ function and(...clauses: (string | undefined | "")[]): string {
 
 type SpanRow = Record<string, unknown>;
 
-interface EntityEventRow {
+interface ObjectEventRow {
   action: string;
-  entity_type: string;
-  entity_id?: string;
+  object_type: string;
+  object_id?: string;
   snapshot?: string | null;
   changes?: string | null;
   note?: string;
@@ -45,13 +45,13 @@ interface EntityEventRow {
   has_error: boolean;
 }
 
-interface EntityEventRowWithDiff extends EntityEventRow {
+interface ObjectEventRowWithDiff extends ObjectEventRow {
   diff?: Record<string, { from: unknown; to: unknown }> | null;
 }
 
-interface EntityEventFilter {
-  entity_type?: string;
-  entity_id?: string;
+interface ObjectEventFilter {
+  object_type?: string;
+  object_id?: string;
   action?: string;
   trace_id?: string;
   last_n_minutes?: number;
@@ -119,17 +119,17 @@ export const failingSchema = z.object({
   last_n_minutes: z.number().optional(),
 });
 
-export const entitiesSchema = z.object({
-  entity_type: z.string().optional(),
+export const objectsSchema = z.object({
+  object_type: z.string().optional(),
   action: z.enum(["create", "update", "delete", "upsert", "custom"]).optional(),
   trace_id: z.string().optional(),
   last_n_minutes: z.number().optional(),
   limit: z.number().default(200),
 });
 
-export const entityTimelineSchema = z.object({
-  entity_type: z.string(),
-  entity_id: z.string().optional(),
+export const objectTimelineSchema = z.object({
+  object_type: z.string(),
+  object_id: z.string().optional(),
   action: z.enum(["create", "update", "delete", "upsert", "custom"]).optional(),
   trace_id: z.string().optional(),
   last_n_minutes: z.number().optional(),
@@ -578,47 +578,47 @@ export async function flightboxFailing(
   }));
 }
 
-export async function flightboxEntities(
-  params: z.infer<typeof entitiesSchema>,
+export async function flightboxObjects(
+  params: z.infer<typeof objectsSchema>,
 ) {
-  const events = await loadEntityEvents(params);
-  const configuredTypes = getConfiguredEntityTypes();
+  const events = await loadObjectEvents(params);
+  const configuredTypes = getConfiguredObjectTypes();
   const byType = new Map<string, {
     total_events: number;
     actions: Record<string, number>;
-    entity_ids: Set<string>;
+    object_ids: Set<string>;
     first_seen_at: number;
     last_seen_at: number;
   }>();
 
   for (const ev of events) {
-    const bucket = byType.get(ev.entity_type) ?? {
+    const bucket = byType.get(ev.object_type) ?? {
       total_events: 0,
       actions: {},
-      entity_ids: new Set<string>(),
+      object_ids: new Set<string>(),
       first_seen_at: ev.at,
       last_seen_at: ev.at,
     };
     bucket.total_events++;
     bucket.actions[ev.action] = (bucket.actions[ev.action] ?? 0) + 1;
-    if (ev.entity_id) bucket.entity_ids.add(ev.entity_id);
+    if (ev.object_id) bucket.object_ids.add(ev.object_id);
     bucket.first_seen_at = Math.min(bucket.first_seen_at, ev.at);
     bucket.last_seen_at = Math.max(bucket.last_seen_at, ev.at);
-    byType.set(ev.entity_type, bucket);
+    byType.set(ev.object_type, bucket);
   }
 
   const types = [...byType.entries()]
-    .map(([entityType, bucket]) => ({
-      entity_type: entityType,
+    .map(([objectType, bucket]) => ({
+      object_type: objectType,
       total_events: bucket.total_events,
-      unique_entities: bucket.entity_ids.size,
+      unique_objects: bucket.object_ids.size,
       actions: bucket.actions,
       first_seen_at: bucket.first_seen_at,
       last_seen_at: bucket.last_seen_at,
     }))
     .sort((a, b) => b.total_events - a.total_events);
 
-  const observedTypes = types.map((t) => t.entity_type);
+  const observedTypes = types.map((t) => t.object_type);
   const observedSet = new Set(observedTypes);
   const configuredSet = new Set(configuredTypes);
   const unobservedConfigured = configuredTypes.filter((type) => !observedSet.has(type));
@@ -626,31 +626,31 @@ export async function flightboxEntities(
 
   return {
     total_events: events.length,
-    unique_entity_types: types.length,
+    unique_object_types: types.length,
     coverage: {
-      configured_entity_types: configuredTypes,
-      observed_entity_types: observedTypes,
+      configured_object_types: configuredTypes,
+      observed_object_types: observedTypes,
       unobserved_configured_types: unobservedConfigured,
       unknown_observed_types: unknownObserved,
     },
-    entity_types: types,
+    object_types: types,
     sample_events: events.slice(0, Math.max(1, Math.min(20, params.limit))),
   };
 }
 
-export async function flightboxEntityTimeline(
-  params: z.infer<typeof entityTimelineSchema>,
+export async function flightboxObjectTimeline(
+  params: z.infer<typeof objectTimelineSchema>,
 ) {
-  const events = await loadEntityEvents({
+  const events = await loadObjectEvents({
     ...params,
-    entity_type: params.entity_type,
+    object_type: params.object_type,
   });
 
   let timeline = events
     .sort((a, b) => a.at - b.at)
     .slice(0, Math.max(1, Math.min(1000, params.limit)));
 
-  // Compute diffs between consecutive snapshots per entity_id
+  // Compute diffs between consecutive snapshots per object_id
   const enriched = computeSnapshotDiffs(timeline, params.field_filter);
 
   // Apply field_filter: keep only events where the filtered field changed
@@ -685,10 +685,10 @@ export async function flightboxEntityTimeline(
   const callGraphAnchors = timeline.map((ev) => ({
     at: ev.at,
     action: ev.action,
-    entity_type: ev.entity_type,
-    entity_id: ev.entity_id,
+    object_type: ev.object_type,
+    object_id: ev.object_id,
     snapshot: ev.snapshot,
-    diff: (ev as EntityEventRowWithDiff).diff ?? null,
+    diff: (ev as ObjectEventRowWithDiff).diff ?? null,
     span_id: ev.span_id,
     parent_id: ev.parent_id,
     trace_id: ev.trace_id,
@@ -718,8 +718,8 @@ export async function flightboxEntityTimeline(
   });
 
   return {
-    entity_type: params.entity_type,
-    entity_id: params.entity_id ?? null,
+    object_type: params.object_type,
+    object_id: params.object_id ?? null,
     total_events: timeline.length,
     field_filter: params.field_filter ?? null,
     timeline: callGraphAnchors,
@@ -892,18 +892,18 @@ LIMIT ${Math.max(1, Math.min(100, params.limit))}
 }
 
 export const oscillationSchema = z.object({
-  entity_type: z.string().optional().describe(
-    "Entity type to check for oscillation (uses entity_events from trackEntityUpdate). " +
-    "Omit entity_type and provide span_name + input_path instead to detect oscillation on raw span input fields.",
+  object_type: z.string().optional().describe(
+    "Object type to check for oscillation (uses object_events from trackObjectUpdate). " +
+    "Omit object_type and provide span_name + input_path instead to detect oscillation on raw span input fields.",
   ),
-  entity_id: z.string().optional(),
+  object_id: z.string().optional(),
   field_path: z.string().describe(
-    "Field to check for ping-pong. For entity mode: top-level snapshot key (e.g. 'state'). " +
+    "Field to check for ping-pong. For object mode: top-level snapshot key (e.g. 'state'). " +
     "For span mode: JSON path into span input (e.g. '$[0].position.y').",
   ),
   span_name: z.string().optional().describe(
-    "Span function name for raw span input mode (alternative to entity_type). " +
-    "Use this when entity tracking isn't wired up.",
+    "Span function name for raw span input mode (alternative to object_type). " +
+    "Use this when object tracking isn't wired up.",
   ),
   input_path: z.string().optional().describe(
     "JSON path into span input for raw span mode (e.g. '$[0].agents.agent-id.position.y'). " +
@@ -921,30 +921,30 @@ export async function flightboxOscillation(
     return detectSpanInputOscillation(params);
   }
 
-  // Entity mode: detect oscillation on entity snapshot fields
-  if (!params.entity_type) {
-    return { error: "Provide either entity_type (entity mode) or span_name + input_path (span mode)" };
+  // Object mode: detect oscillation on entity snapshot fields
+  if (!params.object_type) {
+    return { error: "Provide either object_type (object mode) or span_name + input_path (span mode)" };
   }
 
-  return detectEntityOscillation(params);
+  return detectObjectOscillation(params);
 }
 
-async function detectEntityOscillation(params: z.infer<typeof oscillationSchema>) {
-  const clauses = [`entity_type = '${esc(params.entity_type!)}'`];
-  if (params.entity_id) clauses.push(`entity_id = '${esc(params.entity_id)}'`);
+async function detectObjectOscillation(params: z.infer<typeof oscillationSchema>) {
+  const clauses = [`object_type = '${esc(params.object_type!)}'`];
+  if (params.object_id) clauses.push(`object_id = '${esc(params.object_id)}'`);
   const tf = timeFilter(params.last_n_minutes);
   if (tf) clauses.push(tf);
 
   const fieldPath = esc(params.field_path);
 
-  // Use entityEventsViewSql as a base, then apply LAG to detect oscillation
+  // Use objectEventsViewSql as a base, then apply LAG to detect oscillation
   const sql = `
 WITH events AS (
-  ${entityEventsViewSql()}
+  ${objectEventsViewSql()}
 ),
 filtered AS (
   SELECT
-    entity_id,
+    object_id,
     event_at,
     json_extract_string(snapshot, '$.${fieldPath}') AS field_value
   FROM events
@@ -954,28 +954,28 @@ filtered AS (
 ),
 with_neighbors AS (
   SELECT
-    entity_id,
+    object_id,
     event_at,
     field_value,
-    LAG(field_value) OVER (PARTITION BY entity_id ORDER BY event_at) AS prev_value,
-    LEAD(field_value) OVER (PARTITION BY entity_id ORDER BY event_at) AS next_value
+    LAG(field_value) OVER (PARTITION BY object_id ORDER BY event_at) AS prev_value,
+    LEAD(field_value) OVER (PARTITION BY object_id ORDER BY event_at) AS next_value
   FROM filtered
 ),
 reversals AS (
-  SELECT entity_id, field_value, prev_value, next_value, event_at
+  SELECT object_id, field_value, prev_value, next_value, event_at
   FROM with_neighbors
   WHERE prev_value IS NOT NULL AND next_value IS NOT NULL
     AND prev_value = next_value
     AND prev_value != field_value
 )
 SELECT
-  entity_id,
+  object_id,
   COUNT(*) AS flip_count,
   MIN(event_at) AS first_flip_at,
   MAX(event_at) AS last_flip_at,
   ARRAY_AGG(DISTINCT field_value ORDER BY field_value) AS oscillating_values
 FROM reversals
-GROUP BY entity_id
+GROUP BY object_id
 HAVING COUNT(*) >= ${Math.max(1, params.min_flips)}
 ORDER BY flip_count DESC
 LIMIT 50
@@ -985,7 +985,7 @@ LIMIT 50
     const rows = await query(sql);
     return {
       mode: "entity",
-      entity_type: params.entity_type,
+      object_type: params.object_type,
       field: params.field_path,
       min_flips: params.min_flips,
       oscillating_entities: rows,
@@ -1089,9 +1089,9 @@ async function loadCausalEdges(filter?: {
   return edges;
 }
 
-async function loadEntityEvents(
-  filter: EntityEventFilter,
-): Promise<EntityEventRow[]> {
+async function loadObjectEvents(
+  filter: ObjectEventFilter,
+): Promise<ObjectEventRow[]> {
   const where = and(
     filter.trace_id ? `trace_id = '${esc(filter.trace_id)}'` : "",
     timeFilter(filter.last_n_minutes),
@@ -1099,7 +1099,7 @@ async function loadEntityEvents(
 
   const limit = Math.max(100, Math.min(10000, (filter.limit ?? 200) * 10));
   const rows = await query(
-    entityEventsViewSql(where || undefined) +
+    objectEventsViewSql(where || undefined) +
       ` ORDER BY event_at DESC LIMIT ${limit}`,
   );
 
@@ -1115,7 +1115,7 @@ async function loadEntityEvents(
     spans.map((span) => [String(span.span_id), span]),
   );
 
-  const events: EntityEventRow[] = [];
+  const events: ObjectEventRow[] = [];
   for (const row of rows) {
     const spanId = String(row.span_id ?? "");
     const span = spanById.get(spanId);
@@ -1129,9 +1129,9 @@ async function loadEntityEvents(
 
     events.push({
       action: String(row.action ?? ""),
-      entity_type: String(row.entity_type ?? ""),
-      entity_id: typeof row.entity_id === "string" && row.entity_id.length > 0
-        ? row.entity_id
+      object_type: String(row.object_type ?? ""),
+      object_id: typeof row.object_id === "string" && row.object_id.length > 0
+        ? row.object_id
         : undefined,
       snapshot: typeof row.snapshot === "string" && row.snapshot.length > 0
         ? row.snapshot : null,
@@ -1153,8 +1153,8 @@ async function loadEntityEvents(
   }
 
   return events
-    .filter((ev) => !filter.entity_type || ev.entity_type === filter.entity_type)
-    .filter((ev) => !filter.entity_id || ev.entity_id === filter.entity_id)
+    .filter((ev) => !filter.object_type || ev.object_type === filter.object_type)
+    .filter((ev) => !filter.object_id || ev.object_id === filter.object_id)
     .filter((ev) => !filter.action || ev.action === filter.action)
     .sort((a, b) => b.at - a.at)
     .slice(0, Math.max(1, Math.min(2000, filter.limit ?? 200)));
@@ -1163,14 +1163,14 @@ async function loadEntityEvents(
 // ─── Diff Computation ───
 
 function computeSnapshotDiffs(
-  events: EntityEventRow[],
+  events: ObjectEventRow[],
   _fieldFilter?: string,
-): EntityEventRowWithDiff[] {
-  // Group by entity_id to compute per-entity diffs
-  const prevByEntity = new Map<string, Record<string, unknown>>();
+): ObjectEventRowWithDiff[] {
+  // Group by object_id to compute per-entity diffs
+  const prevByObject = new Map<string, Record<string, unknown>>();
 
   return events.map((ev) => {
-    const entityKey = ev.entity_id ?? "__no_id__";
+    const objectKey = ev.object_id ?? "__no_id__";
 
     // If the event already has explicit changes (caller-provided diff), use those
     if (ev.changes) {
@@ -1179,7 +1179,7 @@ function computeSnapshotDiffs(
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
           // Update prev snapshot for next diff computation
           if (ev.snapshot) {
-            try { prevByEntity.set(entityKey, JSON.parse(ev.snapshot)); } catch {}
+            try { prevByObject.set(objectKey, JSON.parse(ev.snapshot)); } catch {}
           }
           return { ...ev, diff: parsed as Record<string, { from: unknown; to: unknown }> };
         }
@@ -1199,8 +1199,8 @@ function computeSnapshotDiffs(
       return { ...ev, diff: null };
     }
 
-    const prev = prevByEntity.get(entityKey);
-    prevByEntity.set(entityKey, current);
+    const prev = prevByObject.get(objectKey);
+    prevByObject.set(objectKey, current);
 
     if (!prev) return { ...ev, diff: null };
 

@@ -8,10 +8,10 @@
 import type { Span, SpanContext } from "@flightbox/core";
 import {
   createWrap,
-  createEntityStore,
+  createObjectStore,
   createLineageStore,
   createAnnotationStore,
-  createEntityTrackers,
+  createObjectTrackers,
   createLineageHelpers,
   createAnnotate,
   type ContextProvider,
@@ -20,7 +20,7 @@ import {
 
 // Injected by @flightbox/unplugin/vite define config.
 declare const __FLIGHTBOX_BLAST_SCOPE_ID__: string | undefined;
-declare const __FLIGHTBOX_ENTITY_TYPES__: string[] | undefined;
+declare const __FLIGHTBOX_OBJECT_TYPES__: string[] | undefined;
 
 // ── Browser Context Provider (single-threaded call stack) ────────────
 
@@ -74,7 +74,7 @@ interface BrowserConfig {
   wsUrl: string;
   blastScopeId: string | null;
   gitSha: string | null;
-  entityCatalog: { types: string[] };
+  objectCatalog: { types: string[] };
   lineage: {
     maxHops: number;
     requireBlastScope: boolean;
@@ -87,8 +87,8 @@ const config: BrowserConfig = {
   wsUrl: "",
   blastScopeId: readDefinedString("__FLIGHTBOX_BLAST_SCOPE_ID__"),
   gitSha: null,
-  entityCatalog: {
-    types: readDefinedStringArray("__FLIGHTBOX_ENTITY_TYPES__"),
+  objectCatalog: {
+    types: readDefinedStringArray("__FLIGHTBOX_OBJECT_TYPES__"),
   },
   lineage: {
     maxHops: 2,
@@ -98,13 +98,13 @@ const config: BrowserConfig = {
 };
 
 export function configure(overrides: Partial<BrowserConfig>): void {
-  const { entityCatalog, lineage, ...rest } = overrides;
+  const { objectCatalog, lineage, ...rest } = overrides;
   Object.assign(config, rest);
-  if (entityCatalog) {
-    config.entityCatalog = {
-      ...config.entityCatalog,
-      ...entityCatalog,
-      types: normalizeEntityTypes(entityCatalog.types ?? config.entityCatalog.types),
+  if (objectCatalog) {
+    config.objectCatalog = {
+      ...config.objectCatalog,
+      ...objectCatalog,
+      types: normalizeObjectTypes(objectCatalog.types ?? config.objectCatalog.types),
     };
   }
   if (lineage) {
@@ -118,20 +118,20 @@ function getCausalityConfig(): CausalityConfig {
     enabled: config.enabled,
     blastScopeId: config.blastScopeId,
     gitSha: config.gitSha,
-    entityCatalog: config.entityCatalog,
+    objectCatalog: config.objectCatalog,
     lineage: config.lineage,
   };
 }
 
 // ── Shared stores + factories ────────────────────────────────────────
 
-const entityStore = createEntityStore();
+const objectStore = createObjectStore();
 const lineageStore = createLineageStore();
 const annotationStore = createAnnotationStore();
 
 export const __flightbox_wrap = createWrap(
   browserProvider,
-  entityStore,
+  objectStore,
   lineageStore,
   getCausalityConfig,
   bufferSpan,
@@ -140,22 +140,22 @@ export const __flightbox_wrap = createWrap(
 
 export const annotate = createAnnotate(browserProvider, annotationStore);
 
-const trackers = createEntityTrackers(browserProvider, entityStore);
-export const trackEntity = trackers.trackEntity;
-export const trackEntityCreate = trackers.trackEntityCreate;
-export const trackEntityUpdate = trackers.trackEntityUpdate;
-export const trackEntityDelete = trackers.trackEntityDelete;
+const trackers = createObjectTrackers(browserProvider, objectStore);
+export const trackObject = trackers.trackObject;
+export const trackObjectCreate = trackers.trackObjectCreate;
+export const trackObjectUpdate = trackers.trackObjectUpdate;
+export const trackObjectDelete = trackers.trackObjectDelete;
 
 const lineageHelpers = createLineageHelpers(
   browserProvider,
   lineageStore,
-  entityStore,
+  objectStore,
   getCausalityConfig,
 );
 export const withLineage = lineageHelpers.withLineage;
 export const runWithLineage = lineageHelpers.runWithLineage;
 
-export type { TrackEntityInput, EntityAction } from "./causality.js";
+export type { TrackObjectInput, ObjectAction } from "./causality.js";
 
 // ── WebSocket connection ─────────────────────────────────────────────
 
@@ -218,7 +218,7 @@ function drainBuffer(): void {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function normalizeEntityTypes(input: unknown[]): string[] {
+function normalizeObjectTypes(input: unknown[]): string[] {
   return [...new Set(
     input
       .map((value) => (typeof value === "string" ? value.trim() : ""))
@@ -234,10 +234,10 @@ function readDefinedString(symbolName: string): string | null {
 }
 
 function readDefinedStringArray(symbolName: string): string[] {
-  if (symbolName === "__FLIGHTBOX_ENTITY_TYPES__") {
-    if (typeof __FLIGHTBOX_ENTITY_TYPES__ === "undefined") return [];
-    if (!Array.isArray(__FLIGHTBOX_ENTITY_TYPES__)) return [];
-    return normalizeEntityTypes(__FLIGHTBOX_ENTITY_TYPES__);
+  if (symbolName === "__FLIGHTBOX_OBJECT_TYPES__") {
+    if (typeof __FLIGHTBOX_OBJECT_TYPES__ === "undefined") return [];
+    if (!Array.isArray(__FLIGHTBOX_OBJECT_TYPES__)) return [];
+    return normalizeObjectTypes(__FLIGHTBOX_OBJECT_TYPES__);
   }
   return [];
 }

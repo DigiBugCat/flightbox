@@ -8,8 +8,8 @@ import {
   __flightbox_wrap,
   configure,
   flush,
-  trackEntityCreate,
-  trackEntityUpdate,
+  trackObjectCreate,
+  trackObjectUpdate,
 } from "@flightbox/sdk";
 
 // MCP tool imports (we test them directly, not via MCP protocol)
@@ -22,8 +22,8 @@ import {
   flightboxRecent,
   flightboxSiblings,
   flightboxFailing,
-  flightboxEntities,
-  flightboxEntityTimeline,
+  flightboxObjects,
+  flightboxObjectTimeline,
 } from "../packages/mcp-server/src/tools.js";
 
 let tracesDir: string;
@@ -122,7 +122,7 @@ const wrappedExplode = __flightbox_wrap(explode, {
 
 const wrappedCreatePawn = __flightbox_wrap(function createPawn(id: string): Pawn {
   const pawn: Pawn = { id, x: 0, y: 0, hp: 100 };
-  trackEntityCreate("PAWN", id, pawn, { zone: "alpha" });
+  trackObjectCreate("PAWN", id, pawn, { zone: "alpha" });
   return pawn;
 }, {
   name: "createPawn",
@@ -133,7 +133,7 @@ const wrappedCreatePawn = __flightbox_wrap(function createPawn(id: string): Pawn
 const wrappedMovePawn = __flightbox_wrap(
   function movePawn(pawn: Pawn, nextX: number, nextY: number): Pawn {
     const next: Pawn = { ...pawn, x: nextX, y: nextY };
-    trackEntityUpdate(
+    trackObjectUpdate(
       "PAWN",
       pawn.id,
       { x: { from: pawn.x, to: nextX }, y: { from: pawn.y, to: nextY } },
@@ -191,7 +191,7 @@ describe("Flightbox E2E", () => {
     expect(() => wrappedExplode()).toThrow("Something went wrong!");
   });
 
-  it("Step 5: SDK tracks entity create/update activity", () => {
+  it("Step 5: SDK tracks object create/update activity", () => {
     const pawn = wrappedCreatePawn("pawn-1");
     const moved = wrappedMovePawn(pawn, 3, 4);
     expect(moved.x).toBe(3);
@@ -366,19 +366,19 @@ describe("Flightbox E2E", () => {
     expect((second as any).count).toBeGreaterThan(0);
   });
 
-  it("Step 15: MCP flightbox_entities summarizes PAWN activity", async () => {
-    const entities = await flightboxEntities({ entity_type: "PAWN", limit: 50 });
+  it("Step 15: MCP flightbox_objects summarizes PAWN activity", async () => {
+    const entities = await flightboxObjects({ object_type: "PAWN", limit: 50 });
     console.log("  Entity summary:", JSON.stringify(entities, null, 2));
 
     expect((entities as any).total_events).toBeGreaterThan(0);
-    const types = (entities as any).entity_types as any[];
-    expect(types.some((t) => t.entity_type === "PAWN")).toBe(true);
+    const types = (entities as any).object_types as any[];
+    expect(types.some((t) => t.object_type === "PAWN")).toBe(true);
   });
 
-  it("Step 16: MCP flightbox_entity_timeline shows PAWN changes over time", async () => {
-    const timeline = await flightboxEntityTimeline({
-      entity_type: "PAWN",
-      entity_id: "pawn-1",
+  it("Step 16: MCP flightbox_object_timeline shows PAWN changes over time", async () => {
+    const timeline = await flightboxObjectTimeline({
+      object_type: "PAWN",
+      object_id: "pawn-1",
       limit: 50,
     });
     console.log("  PAWN timeline:", JSON.stringify(timeline, null, 2));

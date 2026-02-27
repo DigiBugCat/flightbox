@@ -4,10 +4,10 @@ import { getConfig } from "./config.js";
 import { bufferSpan } from "./buffer.js";
 import {
   createWrap,
-  createEntityStore,
+  createObjectStore,
   createLineageStore,
   createAnnotationStore,
-  createEntityTrackers,
+  createObjectTrackers,
   createLineageHelpers,
   createAnnotate,
   type ContextProvider,
@@ -21,7 +21,7 @@ const nodeProvider: ContextProvider = {
 };
 
 // Shared stores for the Node runtime
-export const entityStore = createEntityStore();
+export const objectStore = createObjectStore();
 export const lineageStore = createLineageStore();
 export const annotationStore = createAnnotationStore();
 
@@ -31,14 +31,14 @@ function getCausalityConfig(): CausalityConfig {
     enabled: cfg.enabled,
     blastScopeId: cfg.blastScopeId,
     gitSha: cfg.gitSha,
-    entityCatalog: cfg.entityCatalog,
+    objectCatalog: cfg.objectCatalog,
     lineage: cfg.lineage,
   };
 }
 
 export const __flightbox_wrap = createWrap(
   nodeProvider,
-  entityStore,
+  objectStore,
   lineageStore,
   getCausalityConfig,
   bufferSpan,
@@ -46,17 +46,17 @@ export const __flightbox_wrap = createWrap(
 );
 
 // Re-export entity trackers bound to node provider + store
-const trackers = createEntityTrackers(nodeProvider, entityStore);
-export const trackEntity = trackers.trackEntity;
-export const trackEntityCreate = trackers.trackEntityCreate;
-export const trackEntityUpdate = trackers.trackEntityUpdate;
-export const trackEntityDelete = trackers.trackEntityDelete;
+const trackers = createObjectTrackers(nodeProvider, objectStore);
+export const trackObject = trackers.trackObject;
+export const trackObjectCreate = trackers.trackObjectCreate;
+export const trackObjectUpdate = trackers.trackObjectUpdate;
+export const trackObjectDelete = trackers.trackObjectDelete;
 
 // Re-export lineage helpers bound to node provider + stores
 const lineageHelpers = createLineageHelpers(
   nodeProvider,
   lineageStore,
-  entityStore,
+  objectStore,
   getCausalityConfig,
 );
 export const withLineage = lineageHelpers.withLineage;
