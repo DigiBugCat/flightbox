@@ -6,8 +6,10 @@ import {
   createWrap,
   createEntityStore,
   createLineageStore,
+  createAnnotationStore,
   createEntityTrackers,
   createLineageHelpers,
+  createAnnotate,
   type ContextProvider,
   type CausalityConfig,
 } from "./causality.js";
@@ -21,6 +23,7 @@ const nodeProvider: ContextProvider = {
 // Shared stores for the Node runtime
 export const entityStore = createEntityStore();
 export const lineageStore = createLineageStore();
+export const annotationStore = createAnnotationStore();
 
 function getCausalityConfig(): CausalityConfig {
   const cfg = getConfig();
@@ -39,6 +42,7 @@ export const __flightbox_wrap = createWrap(
   lineageStore,
   getCausalityConfig,
   bufferSpan,
+  annotationStore,
 );
 
 // Re-export entity trackers bound to node provider + store
@@ -57,3 +61,6 @@ const lineageHelpers = createLineageHelpers(
 );
 export const withLineage = lineageHelpers.withLineage;
 export const runWithLineage = lineageHelpers.runWithLineage;
+
+// Annotate API
+export const annotate = createAnnotate(nodeProvider, annotationStore);

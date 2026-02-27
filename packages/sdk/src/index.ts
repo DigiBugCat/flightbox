@@ -10,6 +10,7 @@ export {
   trackEntityUpdate,
   trackEntityDelete,
 } from "./wrap.js";
+export { annotate } from "./wrap.js";
 export type { EntityAction, TrackEntityInput } from "./causality.js";
 
 // Auto-start flushing on import — zero config needed

@@ -10,8 +10,10 @@ import {
   createWrap,
   createEntityStore,
   createLineageStore,
+  createAnnotationStore,
   createEntityTrackers,
   createLineageHelpers,
+  createAnnotate,
   type ContextProvider,
   type CausalityConfig,
 } from "./causality.js";
@@ -125,6 +127,7 @@ function getCausalityConfig(): CausalityConfig {
 
 const entityStore = createEntityStore();
 const lineageStore = createLineageStore();
+const annotationStore = createAnnotationStore();
 
 export const __flightbox_wrap = createWrap(
   browserProvider,
@@ -132,7 +135,10 @@ export const __flightbox_wrap = createWrap(
   lineageStore,
   getCausalityConfig,
   bufferSpan,
+  annotationStore,
 );
+
+export const annotate = createAnnotate(browserProvider, annotationStore);
 
 const trackers = createEntityTrackers(browserProvider, entityStore);
 export const trackEntity = trackers.trackEntity;

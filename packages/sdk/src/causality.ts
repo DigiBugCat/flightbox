@@ -219,6 +219,41 @@ export function createLineageStore(): LineageStore {
   };
 }
 
+// ── Annotation Store ─────────────────────────────────────────────────
+
+export interface AnnotationStore {
+  begin(spanId: string): void;
+  finalize(span: Span): void;
+  set(spanId: string, key: string, value: unknown): boolean;
+}
+
+export function createAnnotationStore(): AnnotationStore {
+  const annotationsBySpanId = new Map<string, Record<string, unknown>>();
+
+  return {
+    begin(spanId: string): void {
+      annotationsBySpanId.set(spanId, {});
+    },
+
+    finalize(span: Span): void {
+      const annotations = annotationsBySpanId.get(span.span_id);
+      annotationsBySpanId.delete(span.span_id);
+      if (!annotations || Object.keys(annotations).length === 0) return;
+
+      const tags = parseTags(span.tags);
+      tags.annotations = { ...(isRecord(tags.annotations) ? tags.annotations : {}), ...annotations };
+      span.tags = JSON.stringify(tags);
+    },
+
+    set(spanId: string, key: string, value: unknown): boolean {
+      const store = annotationsBySpanId.get(spanId);
+      if (!store) return false;
+      store[key] = value;
+      return true;
+    },
+  };
+}
+
 // ── Blast Scope ──────────────────────────────────────────────────────
 
 export function stampBlastScope(span: Span, blastScopeId: string | null): void {
@@ -326,6 +361,7 @@ export function createWrap(
   lineageStore: LineageStore,
   getConfig: () => CausalityConfig,
   bufferSpan: (span: Span) => void,
+  annotationStore?: AnnotationStore,
 ): <T extends (...args: any[]) => any>(fn: T, meta: SpanMeta) => T {
   return function __flightbox_wrap<T extends (...args: any[]) => any>(
     fn: T,
@@ -344,6 +380,7 @@ export function createWrap(
       stampBlastScope(span, cfg.blastScopeId);
       entityStore.beginTracking(span.span_id);
       lineageStore.beginTracking(span.span_id, `${span.module}#${span.name}`);
+      annotationStore?.begin(span.span_id);
 
       const ctx: SpanContext = { trace_id: span.trace_id, span_id: span.span_id };
 
@@ -353,6 +390,7 @@ export function createWrap(
 
           if (isGenerator) {
             completeSpan(span, "[Generator]");
+            annotationStore?.finalize(span);
             entityStore.finalizeTracking(span);
             lineageStore.finalizeTracking(span);
             bufferSpan(span);
@@ -379,12 +417,14 @@ export function createWrap(
           }
 
           completeSpan(span, result);
+          annotationStore?.finalize(span);
           entityStore.finalizeTracking(span);
           lineageStore.finalizeTracking(span);
           bufferSpan(span);
           return result;
         } catch (err) {
           failSpan(span, err);
+          annotationStore?.finalize(span);
           entityStore.finalizeTracking(span);
           lineageStore.finalizeTracking(span);
           bufferSpan(span);
@@ -434,6 +474,23 @@ export function createEntityTrackers(
   }
 
   return { trackEntity, trackEntityCreate, trackEntityUpdate, trackEntityDelete };
+}
+
+// ── Annotate Factory ─────────────────────────────────────────────────
+
+export function createAnnotate(
+  provider: ContextProvider,
+  annotationStore: AnnotationStore,
+) {
+  /**
+   * Add a key/value annotation to the current span's tags.
+   * No-op when no active span. Queryable via json_extract_string(tags, '$.annotations.key').
+   */
+  return function annotate(key: string, value: unknown): boolean {
+    const ctx = provider.extract();
+    if (!ctx) return false;
+    return annotationStore.set(ctx.span_id, key, value);
+  };
 }
 
 // ── Shared Helpers ───────────────────────────────────────────────────
