@@ -1,6 +1,6 @@
 {
   "name": "@flightbox/babel-plugin",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "description": "Babel plugin for auto-instrumenting functions with Flightbox",
   "type": "module",
   "main": "dist/index.js",
