@@ -37,10 +37,151 @@ import {
   flightboxSchema,
 } from "./tools.js";
 
+const SETUP_GUIDE = `# Flightbox Setup Guide
+
+Flightbox is passive causality tracing — it records function execution (args, returns, errors, timing, call trees) to Parquet files, then exposes MCP tools to query them.
+
+## Step 1: Install
+
+### Node.js (loader hook — zero config)
+\`\`\`bash
+npm install @flightbox/register @flightbox/sdk
+node --import @flightbox/register ./src/index.ts
+\`\`\`
+Every function gets instrumented automatically.
+
+### Vite (browser + Node)
+\`\`\`bash
+npm install @flightbox/unplugin @flightbox/sdk
+\`\`\`
+\`\`\`ts
+// vite.config.ts
+import flightbox from '@flightbox/unplugin/vite'
+
+export default {
+  plugins: [
+    flightbox({
+      include: ['**/systems/**'],         // explicit include patterns (optional)
+      objects: { types: ['AGENT', 'ITEM'] }, // object types to track (optional)
+    }),
+  ],
+}
+\`\`\`
+The Vite plugin auto-instruments recently changed files (git blast radius), aliases the SDK for browser, and starts a WebSocket collector.
+
+## Step 2: Wire Up Object Tracking (optional but high-value)
+
+At mutation points in your code, add tracking calls. This gives the MCP tools structured timelines with diffs.
+
+\`\`\`ts
+import { trackObjectCreate, trackObjectUpdate, trackObjectDelete } from '@flightbox/sdk'
+
+// On creation — pass full snapshot
+trackObjectCreate('AGENT', agent.id, { x: agent.x, y: agent.y, state: agent.state })
+
+// On update — pass current state as snapshot (diffs computed at query time)
+trackObjectUpdate('AGENT', agent.id, undefined, { x: agent.x, y: agent.y, state: agent.state })
+
+// On deletion
+trackObjectDelete('AGENT', agent.id)
+\`\`\`
+
+Signature: \`trackObjectUpdate(objectType, objectId?, changes?, snapshot?, dimensions?)\`
+
+- **snapshot**: Current state. MCP computes diffs between consecutive snapshots automatically.
+- **changes**: Optional explicit diff if you already have one (e.g. \`{ position: { from: {x:1}, to: {x:2} } }\`).
+- **dimensions**: Optional flat metadata (e.g. \`{ zone: "north", tick: 1234 }\`).
+
+Where to add tracking calls:
+- State machine transitions
+- Position/movement updates
+- Creation/destruction of game objects or domain entities
+- Any mutation you'd want to query later ("what happened to X over time?")
+
+## Step 3: Add Annotations (optional)
+
+For lightweight metadata on the current span — decision branches, scoring results:
+
+\`\`\`ts
+import { annotate } from '@flightbox/sdk'
+
+annotate('branch', stateMachine.state)
+annotate('winner', { id: winner.id, score: winner.score })
+\`\`\`
+
+## Step 4: Cross-Boundary Lineage (optional)
+
+To trace causality across process boundaries (server → client):
+
+\`\`\`ts
+import { createTransportLineageAdapter } from '@flightbox/sdk'
+
+const lineage = createTransportLineageAdapter()
+
+// Server send:
+ws.send(JSON.stringify(lineage.stamp({ kind: 'tick', delta })))
+
+// Client receive:
+lineage.receive(message, () => applyDelta(message.delta))
+\`\`\`
+
+## Step 5: Expand Blast Radius (when debugging)
+
+By default only git-changed files are instrumented. To temporarily add more:
+
+\`\`\`bash
+FLIGHTBOX_INCLUDE="**/stateMachine**" npm run dev     # adds to git patterns
+FLIGHTBOX_ONLY="**/systems/**" npm run dev             # replaces git patterns
+\`\`\`
+
+## Traces Location
+
+Traces go to \`~/.flightbox/traces/{project-name}/\` (auto-detected from package.json).
+Override with \`FLIGHTBOX_TRACES_DIR\` env var.
+Files older than 24 hours are auto-cleaned (configure with \`FLIGHTBOX_RETENTION_HOURS\`).
+
+## Available MCP Tools
+
+After setup, use these tools to debug:
+
+**Start here:**
+- \`flightbox_summary\` — trace overview
+- \`flightbox_failing\` — recent errors
+- \`flightbox_hotspots\` — find spam calls / hot loops
+- \`flightbox_schema\` — discover tracked object shapes
+
+**Dig deeper:**
+- \`flightbox_walk\` — trace causal chain up/down
+- \`flightbox_inspect\` — full span detail (args, return, error)
+- \`flightbox_object_timeline\` — object state changes over time with diffs
+
+**Pattern detection:**
+- \`flightbox_input_stability\` — repeated calls with identical input
+- \`flightbox_intervals\` — timing between consecutive calls
+- \`flightbox_oscillation\` — detect ping-pong state changes
+
+**Escape hatch:**
+- \`flightbox_query\` — arbitrary DuckDB SQL against \`spans\` table
+`;
+
 const server = new McpServer({
   name: "flightbox",
   version: "0.0.1",
 });
+
+server.tool(
+  "flightbox_setup",
+  "One-time setup guide for wiring Flightbox into a project. Call this when you need to add tracing to a new codebase or wire up object tracking in an existing one.",
+  {},
+  async () => ({
+    content: [
+      {
+        type: "text",
+        text: SETUP_GUIDE,
+      },
+    ],
+  }),
+);
 
 server.tool(
   "flightbox_summary",
