@@ -74,6 +74,11 @@ function parquetGlob(): string {
   return `'${getTracesDir()}/*.parquet'`;
 }
 
+/** Returns the parquet table expression for use in raw SQL (no SELECT, no WHERE). */
+export function fromSpansInline(): string {
+  return `read_parquet(${parquetGlob()}, union_by_name=true)`;
+}
+
 export function fromSpans(where?: string, orderBy?: string): string {
   let sql = `SELECT * FROM read_parquet(${parquetGlob()}, union_by_name=true)`;
   if (where) sql += ` WHERE ${where}`;

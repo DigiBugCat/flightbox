@@ -14,6 +14,10 @@ import {
   entitiesSchema,
   entityTimelineSchema,
   querySchema,
+  hotspotsSchema,
+  inputStabilitySchema,
+  intervalsSchema,
+  oscillationSchema,
   flightboxSummary,
   flightboxChildren,
   flightboxInspect,
@@ -25,6 +29,10 @@ import {
   flightboxEntities,
   flightboxEntityTimeline,
   flightboxQuery,
+  flightboxHotspots,
+  flightboxInputStability,
+  flightboxIntervals,
+  flightboxOscillation,
 } from "./tools.js";
 
 const server = new McpServer({
@@ -155,6 +163,56 @@ server.tool(
   async (params) => ({
     content: [
       { type: "text", text: JSON.stringify(await flightboxQuery(params), null, 2) },
+    ],
+  }),
+);
+
+server.tool(
+  "flightbox_hotspots",
+  "Find functions called most frequently. Returns call count, calls/minute, avg duration, error count. " +
+  "Use to identify spam calls, hot loops, and functions that dominate runtime.",
+  hotspotsSchema.shape,
+  async (params) => ({
+    content: [
+      { type: "text", text: JSON.stringify(await flightboxHotspots(params), null, 2) },
+    ],
+  }),
+);
+
+server.tool(
+  "flightbox_input_stability",
+  "Find functions called repeatedly with identical input. Groups by md5(input) to detect wasted work " +
+  "(same args producing same result). Use to find functions that should be memoized or have stale cache invalidation.",
+  inputStabilitySchema.shape,
+  async (params) => ({
+    content: [
+      { type: "text", text: JSON.stringify(await flightboxInputStability(params), null, 2) },
+    ],
+  }),
+);
+
+server.tool(
+  "flightbox_intervals",
+  "Measure timing between consecutive calls to a function. Returns avg/min/max/stddev interval in ms. " +
+  "Use to detect tick rate mismatches, frame drops, or irregular scheduling.",
+  intervalsSchema.shape,
+  async (params) => ({
+    content: [
+      { type: "text", text: JSON.stringify(await flightboxIntervals(params), null, 2) },
+    ],
+  }),
+);
+
+server.tool(
+  "flightbox_oscillation",
+  "Detect values that ping-pong between states (A→B→A→B). Works in two modes: " +
+  "(1) Entity mode: provide entity_type + field_path to check entity snapshot fields. " +
+  "(2) Span mode: provide span_name + input_path to check raw function inputs. " +
+  "Use to find state machine bugs, infinite loops, and flip-flop conditions.",
+  oscillationSchema.shape,
+  async (params) => ({
+    content: [
+      { type: "text", text: JSON.stringify(await flightboxOscillation(params), null, 2) },
     ],
   }),
 );

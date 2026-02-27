@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   query,
   fromSpans,
+  fromSpansInline,
   countSpans,
   getTracesDir,
   getConfiguredEntityTypes,
@@ -753,6 +754,297 @@ export async function flightboxQuery(
   try {
     const rows = await query(sql);
     return { rows, count: rows.length };
+  } catch (err) {
+    return { error: String(err) };
+  }
+}
+
+// ─── Pattern Detection Tools ───
+
+export const hotspotsSchema = z.object({
+  last_n_minutes: z.number().optional(),
+  min_calls: z.number().default(10).describe("Minimum total calls to include in results"),
+  limit: z.number().default(20),
+});
+
+export async function flightboxHotspots(
+  params: z.infer<typeof hotspotsSchema>,
+) {
+  const tf = timeFilter(params.last_n_minutes);
+  const whereClause = tf ? `WHERE ${tf}` : "";
+
+  // Compute the actual time window for calls_per_minute calculation
+  const windowMinutes = params.last_n_minutes ?? 60;
+
+  const sql = `
+SELECT
+  name,
+  module,
+  COUNT(*) AS total_calls,
+  ROUND(COUNT(*) * 1.0 / ${windowMinutes}, 1) AS calls_per_minute,
+  ROUND(AVG(duration_ms), 3) AS avg_ms,
+  ROUND(MIN(duration_ms), 3) AS min_ms,
+  ROUND(MAX(duration_ms), 3) AS max_ms,
+  SUM(CASE WHEN error IS NOT NULL AND error != '' THEN 1 ELSE 0 END) AS error_count
+FROM ${fromSpansInline()}
+${whereClause}
+GROUP BY name, module
+HAVING COUNT(*) >= ${Math.max(1, params.min_calls)}
+ORDER BY total_calls DESC
+LIMIT ${Math.max(1, Math.min(100, params.limit))}
+`;
+
+  try {
+    const rows = await query(sql);
+    return { hotspots: rows, window_minutes: windowMinutes };
+  } catch (err) {
+    return { error: String(err) };
+  }
+}
+
+export const inputStabilitySchema = z.object({
+  name_pattern: z.string().describe("Function name pattern to search (case-insensitive substring match)"),
+  last_n_minutes: z.number().optional(),
+  limit: z.number().default(20),
+});
+
+export async function flightboxInputStability(
+  params: z.infer<typeof inputStabilitySchema>,
+) {
+  const clauses = [`name ILIKE '%${esc(params.name_pattern)}%'`];
+  const tf = timeFilter(params.last_n_minutes);
+  if (tf) clauses.push(tf);
+
+  const sql = `
+SELECT
+  name,
+  module,
+  input,
+  md5(COALESCE(input, '')) AS input_hash,
+  COUNT(*) AS call_count,
+  ROUND(AVG(duration_ms), 3) AS avg_ms,
+  MIN(started_at) AS first_at,
+  MAX(started_at) AS last_at
+FROM ${fromSpansInline()}
+WHERE ${clauses.join(" AND ")}
+GROUP BY name, module, input, md5(COALESCE(input, ''))
+ORDER BY call_count DESC
+LIMIT ${Math.max(1, Math.min(100, params.limit))}
+`;
+
+  try {
+    const rows = await query(sql);
+    return {
+      repeated_inputs: rows,
+      total_groups: rows.length,
+    };
+  } catch (err) {
+    return { error: String(err) };
+  }
+}
+
+export const intervalsSchema = z.object({
+  name_pattern: z.string().describe("Function name pattern to search (case-insensitive substring match)"),
+  last_n_minutes: z.number().optional(),
+  limit: z.number().default(10),
+});
+
+export async function flightboxIntervals(
+  params: z.infer<typeof intervalsSchema>,
+) {
+  const clauses = [`name ILIKE '%${esc(params.name_pattern)}%'`];
+  const tf = timeFilter(params.last_n_minutes);
+  if (tf) clauses.push(tf);
+
+  const sql = `
+WITH ordered AS (
+  SELECT
+    name, module, started_at,
+    LAG(started_at) OVER (PARTITION BY name, module ORDER BY started_at) AS prev_at
+  FROM ${fromSpansInline()}
+  WHERE ${clauses.join(" AND ")}
+),
+intervals AS (
+  SELECT name, module, (started_at - prev_at) AS interval_ms
+  FROM ordered
+  WHERE prev_at IS NOT NULL
+)
+SELECT
+  name,
+  module,
+  COUNT(*) AS interval_count,
+  ROUND(AVG(interval_ms), 1) AS avg_interval_ms,
+  MIN(interval_ms) AS min_interval_ms,
+  MAX(interval_ms) AS max_interval_ms,
+  ROUND(STDDEV(interval_ms), 1) AS stddev_interval_ms
+FROM intervals
+GROUP BY name, module
+ORDER BY avg_interval_ms ASC
+LIMIT ${Math.max(1, Math.min(100, params.limit))}
+`;
+
+  try {
+    const rows = await query(sql);
+    return { intervals: rows };
+  } catch (err) {
+    return { error: String(err) };
+  }
+}
+
+export const oscillationSchema = z.object({
+  entity_type: z.string().optional().describe(
+    "Entity type to check for oscillation (uses entity_events from trackEntityUpdate). " +
+    "Omit entity_type and provide span_name + input_path instead to detect oscillation on raw span input fields.",
+  ),
+  entity_id: z.string().optional(),
+  field_path: z.string().describe(
+    "Field to check for ping-pong. For entity mode: top-level snapshot key (e.g. 'state'). " +
+    "For span mode: JSON path into span input (e.g. '$[0].position.y').",
+  ),
+  span_name: z.string().optional().describe(
+    "Span function name for raw span input mode (alternative to entity_type). " +
+    "Use this when entity tracking isn't wired up.",
+  ),
+  input_path: z.string().optional().describe(
+    "JSON path into span input for raw span mode (e.g. '$[0].agents.agent-id.position.y'). " +
+    "Used with span_name.",
+  ),
+  last_n_minutes: z.number().optional(),
+  min_flips: z.number().default(3).describe("Minimum direction reversals to flag as oscillating"),
+});
+
+export async function flightboxOscillation(
+  params: z.infer<typeof oscillationSchema>,
+) {
+  // Span input mode: detect oscillation on raw span input fields
+  if (params.span_name && params.input_path) {
+    return detectSpanInputOscillation(params);
+  }
+
+  // Entity mode: detect oscillation on entity snapshot fields
+  if (!params.entity_type) {
+    return { error: "Provide either entity_type (entity mode) or span_name + input_path (span mode)" };
+  }
+
+  return detectEntityOscillation(params);
+}
+
+async function detectEntityOscillation(params: z.infer<typeof oscillationSchema>) {
+  const clauses = [`entity_type = '${esc(params.entity_type!)}'`];
+  if (params.entity_id) clauses.push(`entity_id = '${esc(params.entity_id)}'`);
+  const tf = timeFilter(params.last_n_minutes);
+  if (tf) clauses.push(tf);
+
+  const fieldPath = esc(params.field_path);
+
+  // Use entityEventsViewSql as a base, then apply LAG to detect oscillation
+  const sql = `
+WITH events AS (
+  ${entityEventsViewSql()}
+),
+filtered AS (
+  SELECT
+    entity_id,
+    event_at,
+    json_extract_string(snapshot, '$.${fieldPath}') AS field_value
+  FROM events
+  WHERE ${clauses.join(" AND ")}
+    AND snapshot IS NOT NULL
+    AND json_extract_string(snapshot, '$.${fieldPath}') IS NOT NULL
+),
+with_neighbors AS (
+  SELECT
+    entity_id,
+    event_at,
+    field_value,
+    LAG(field_value) OVER (PARTITION BY entity_id ORDER BY event_at) AS prev_value,
+    LEAD(field_value) OVER (PARTITION BY entity_id ORDER BY event_at) AS next_value
+  FROM filtered
+),
+reversals AS (
+  SELECT entity_id, field_value, prev_value, next_value, event_at
+  FROM with_neighbors
+  WHERE prev_value IS NOT NULL AND next_value IS NOT NULL
+    AND prev_value = next_value
+    AND prev_value != field_value
+)
+SELECT
+  entity_id,
+  COUNT(*) AS flip_count,
+  MIN(event_at) AS first_flip_at,
+  MAX(event_at) AS last_flip_at,
+  ARRAY_AGG(DISTINCT field_value ORDER BY field_value) AS oscillating_values
+FROM reversals
+GROUP BY entity_id
+HAVING COUNT(*) >= ${Math.max(1, params.min_flips)}
+ORDER BY flip_count DESC
+LIMIT 50
+`;
+
+  try {
+    const rows = await query(sql);
+    return {
+      mode: "entity",
+      entity_type: params.entity_type,
+      field: params.field_path,
+      min_flips: params.min_flips,
+      oscillating_entities: rows,
+    };
+  } catch (err) {
+    return { error: String(err) };
+  }
+}
+
+async function detectSpanInputOscillation(params: z.infer<typeof oscillationSchema>) {
+  const clauses = [`name = '${esc(params.span_name!)}'`];
+  const tf = timeFilter(params.last_n_minutes);
+  if (tf) clauses.push(tf);
+
+  const inputPath = esc(params.input_path ?? params.field_path);
+
+  const sql = `
+WITH ordered AS (
+  SELECT
+    started_at,
+    json_extract_string(input, '${inputPath}') AS field_value
+  FROM ${fromSpansInline()}
+  WHERE ${clauses.join(" AND ")}
+    AND json_extract_string(input, '${inputPath}') IS NOT NULL
+),
+with_neighbors AS (
+  SELECT
+    started_at,
+    field_value,
+    LAG(field_value) OVER (ORDER BY started_at) AS prev_value,
+    LEAD(field_value) OVER (ORDER BY started_at) AS next_value
+  FROM ordered
+),
+reversals AS (
+  SELECT field_value, prev_value, next_value, started_at
+  FROM with_neighbors
+  WHERE prev_value IS NOT NULL AND next_value IS NOT NULL
+    AND prev_value = next_value
+    AND prev_value != field_value
+)
+SELECT
+  COUNT(*) AS flip_count,
+  MIN(started_at) AS first_flip_at,
+  MAX(started_at) AS last_flip_at,
+  ARRAY_AGG(DISTINCT field_value ORDER BY field_value) AS oscillating_values,
+  ARRAY_AGG(DISTINCT prev_value ORDER BY prev_value) AS stable_values
+FROM reversals
+HAVING COUNT(*) >= ${Math.max(1, params.min_flips)}
+`;
+
+  try {
+    const rows = await query(sql);
+    return {
+      mode: "span_input",
+      span_name: params.span_name,
+      input_path: params.input_path ?? params.field_path,
+      min_flips: params.min_flips,
+      result: rows.length > 0 ? rows[0] : { flip_count: 0, oscillating_values: [] },
+    };
   } catch (err) {
     return { error: String(err) };
   }
