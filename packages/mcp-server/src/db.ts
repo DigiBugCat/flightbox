@@ -3,6 +3,7 @@ import type { DuckDBConnection } from "@duckdb/node-api";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import { readdirSync, statSync, unlinkSync, existsSync, readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 
 let instance: DuckDBInstance | null = null;
 let connection: DuckDBConnection | null = null;
@@ -16,7 +17,29 @@ export function getTracesDir(): string {
   if (process.env.FLIGHTBOX_TRACES_DIR) {
     return process.env.FLIGHTBOX_TRACES_DIR;
   }
-  return join(homedir(), ".flightbox", "traces", basename(process.cwd()));
+  return join(homedir(), ".flightbox", "traces", detectProjectRoot());
+}
+
+/**
+ * Find the project root (git root or cwd) and encode the full path
+ * as a nested directory structure under ~/.flightbox/traces/.
+ * /Users/andrew/dev/pantainos-world → Users/andrew/dev/pantainos-world
+ * This ensures monorepo subpackages all share one traces dir,
+ * and projects with the same name in different locations don't collide.
+ */
+function detectProjectRoot(): string {
+  let root: string;
+  try {
+    root = execSync("git rev-parse --show-toplevel", {
+      encoding: "utf8",
+      timeout: 2000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    root = process.cwd();
+  }
+  // Strip leading slash to create a relative nested path
+  return root.replace(/^\//, "");
 }
 
 const DEFAULT_RETENTION_HOURS = 24;

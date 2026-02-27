@@ -83,8 +83,21 @@ export function getConfig(): SdkConfig {
 
 function detectProjectTracesDir(): string {
   const base = join(homedir(), ".flightbox", "traces");
-  const project = basename(process.cwd());
-  return join(base, project);
+  return join(base, detectProjectRoot());
+}
+
+function detectProjectRoot(): string {
+  let root: string;
+  try {
+    root = execSync("git rev-parse --show-toplevel", {
+      encoding: "utf8",
+      timeout: 2000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    root = process.cwd();
+  }
+  return root.replace(/^\//, "");
 }
 
 function detectGitSha(): string | null {

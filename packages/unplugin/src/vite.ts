@@ -197,14 +197,24 @@ function cleanTracesDir(dir: string): void {
 
 // ── Project detection ─────────────────────────────────────────────────
 
-function detectProjectName(): string {
-  return basename(process.cwd());
+function detectProjectRoot(): string {
+  let root: string;
+  try {
+    root = execSync("git rev-parse --show-toplevel", {
+      encoding: "utf8",
+      timeout: 2000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    root = process.cwd();
+  }
+  return root.replace(/^\//, "");
 }
 
 // ── Vite plugin ───────────────────────────────────────────────────────
 
 export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
-  const tracesDir = join(homedir(), ".flightbox", "traces", detectProjectName());
+  const tracesDir = join(homedir(), ".flightbox", "traces", detectProjectRoot());
   const declaredObjectTypes: string[] = [...new Set(
     (options?.objects?.types ?? [] as string[])
       .map((t: string) => t.trim())
