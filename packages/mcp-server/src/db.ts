@@ -2,7 +2,7 @@ import { DuckDBInstance } from "@duckdb/node-api";
 import type { DuckDBConnection } from "@duckdb/node-api";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { readdirSync, statSync, unlinkSync } from "node:fs";
+import { readdirSync, statSync, unlinkSync, existsSync, readFileSync } from "node:fs";
 
 let instance: DuckDBInstance | null = null;
 let connection: DuckDBConnection | null = null;
@@ -85,4 +85,142 @@ export function countSpans(where?: string): string {
   let sql = `SELECT count(*) as cnt FROM read_parquet(${parquetGlob()}, union_by_name=true)`;
   if (where) sql += ` WHERE ${where}`;
   return sql;
+}
+
+export function callEdgesViewSql(where?: string): string {
+  const clauses = [
+    `parent_id IS NOT NULL`,
+    `parent_id != ''`,
+  ];
+  if (where) clauses.push(where);
+  return `
+SELECT
+  'span' AS from_node_type,
+  parent_id AS from_node_id,
+  'span' AS to_node_type,
+  span_id AS to_node_id,
+  'call' AS edge_kind,
+  'exact' AS evidence_kind,
+  1.0 AS confidence,
+  trace_id,
+  started_at AS event_at
+FROM read_parquet(${parquetGlob()}, union_by_name=true)
+WHERE ${clauses.join(" AND ")}
+`;
+}
+
+export function lineageEdgesViewSql(where?: string): string {
+  const clauses = [
+    `spans.tags_json IS NOT NULL`,
+  ];
+  if (where) clauses.push(where);
+  return `
+SELECT
+  'span' AS from_node_type,
+  CAST(json_extract_string(json_each.value, '$.span_id') AS VARCHAR) AS from_node_id,
+  'span' AS to_node_type,
+  span_id AS to_node_id,
+  'lineage' AS edge_kind,
+  COALESCE(CAST(json_extract_string(json_each.value, '$.evidence_kind') AS VARCHAR), 'exact') AS evidence_kind,
+  CASE
+    WHEN COALESCE(CAST(json_extract_string(json_each.value, '$.evidence_kind') AS VARCHAR), 'exact') = 'exact' THEN 1.0
+    WHEN COALESCE(CAST(json_extract_string(json_each.value, '$.evidence_kind') AS VARCHAR), 'exact') = 'inferred' THEN 0.5
+    ELSE 0.0
+  END AS confidence,
+  spans.trace_id,
+  spans.started_at AS event_at
+FROM (
+  SELECT
+    *,
+    TRY_CAST(tags AS JSON) AS tags_json
+  FROM read_parquet(${parquetGlob()}, union_by_name=true)
+) AS spans,
+LATERAL json_each(COALESCE(json_extract(spans.tags_json, '$.lineage_recv'), '[]'))
+WHERE ${clauses.join(" AND ")}
+AND CAST(json_extract_string(json_each.value, '$.span_id') AS VARCHAR) IS NOT NULL
+AND CAST(json_extract_string(json_each.value, '$.span_id') AS VARCHAR) != ''
+`;
+}
+
+export function entityEventsViewSql(where?: string): string {
+  const clauses = [
+    `spans.tags_json IS NOT NULL`,
+  ];
+  if (where) clauses.push(where);
+  return `
+SELECT
+  spans.span_id,
+  spans.trace_id,
+  spans.started_at AS event_at,
+  CAST(json_extract_string(json_each.value, '$.action') AS VARCHAR) AS action,
+  CAST(json_extract_string(json_each.value, '$.entity_type') AS VARCHAR) AS entity_type,
+  CAST(json_extract_string(json_each.value, '$.entity_id') AS VARCHAR) AS entity_id,
+  CAST(json_extract_string(json_each.value, '$.snapshot') AS VARCHAR) AS snapshot,
+  CAST(json_extract_string(json_each.value, '$.changes') AS VARCHAR) AS changes,
+  CAST(json_extract_string(json_each.value, '$.note') AS VARCHAR) AS note,
+  CAST(json_extract(json_each.value, '$.dimensions') AS VARCHAR) AS dimensions_json
+FROM (
+  SELECT
+    *,
+    TRY_CAST(tags AS JSON) AS tags_json
+  FROM read_parquet(${parquetGlob()}, union_by_name=true)
+) AS spans,
+LATERAL json_each(COALESCE(json_extract(spans.tags_json, '$.entities'), '[]'))
+WHERE ${clauses.join(" AND ")}
+AND CAST(json_extract_string(json_each.value, '$.action') AS VARCHAR) IS NOT NULL
+AND CAST(json_extract_string(json_each.value, '$.entity_type') AS VARCHAR) IS NOT NULL
+`;
+}
+
+export function causalEdgesViewSql(where?: string): string {
+  return `
+SELECT * FROM (
+${callEdgesViewSql(where)}
+) AS call_edges
+UNION ALL
+SELECT * FROM (
+${lineageEdgesViewSql(where)}
+) AS lineage_edges
+`;
+}
+
+interface FlightboxManifest {
+  declared_entity_types?: unknown;
+}
+
+export function getConfiguredEntityTypes(): string[] {
+  const envRaw = process.env.FLIGHTBOX_ENTITY_TYPES;
+  if (envRaw) {
+    const parsed = parseEntityTypes(envRaw);
+    if (parsed.length > 0) return parsed;
+  }
+
+  const manifestPath = join(process.cwd(), ".flightbox", "manifest.json");
+  if (!existsSync(manifestPath)) return [];
+
+  try {
+    const raw = readFileSync(manifestPath, "utf8");
+    const parsed = JSON.parse(raw) as FlightboxManifest;
+    return normalizeEntityTypes(parsed.declared_entity_types);
+  } catch {
+    return [];
+  }
+}
+
+function parseEntityTypes(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return normalizeEntityTypes(parsed);
+  } catch {
+    return normalizeEntityTypes(raw.split(","));
+  }
+}
+
+function normalizeEntityTypes(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return [...new Set(
+    input
+      .map((value) => (typeof value === "string" ? value.trim() : ""))
+      .filter((value) => value.length > 0),
+  )];
 }

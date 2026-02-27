@@ -10,6 +10,10 @@
 import { createSpan, completeSpan, failSpan, serialize } from "@flightbox/core";
 import type { Span, SpanMeta, SpanContext } from "@flightbox/core";
 
+// Injected by @flightbox/unplugin/vite define config.
+declare const __FLIGHTBOX_BLAST_SCOPE_ID__: string | undefined;
+declare const __FLIGHTBOX_ENTITY_TYPES__: string[] | undefined;
+
 // ── Call stack (single-threaded parent tracking) ──────────────────────
 
 const callStack: SpanContext[] = [];
@@ -68,24 +72,166 @@ interface EntityEvent {
   at: number;
 }
 
+interface LineageSubjectEntity {
+  type: string;
+  id?: string;
+}
+
+interface LineagePayload {
+  trace_id: string;
+  span_id: string;
+  subject_entity: LineageSubjectEntity;
+  actor_system: string;
+  hop: number;
+  max_hops: number;
+  blast_scope_id: string | null;
+}
+
+type LineageEvidenceKind = "exact" | "inferred" | "gap";
+
+interface LineageRecord extends LineagePayload {
+  at: number;
+  evidence_kind: LineageEvidenceKind;
+}
+
+interface SpanLineage {
+  lineage_send: LineageRecord[];
+  lineage_recv: LineageRecord[];
+}
+
 const MAX_EVENTS_PER_SPAN = 200;
 const eventsBySpanId = new Map<string, EntityEvent[]>();
+const lineageBySpanId = new Map<string, SpanLineage>();
+const actorBySpanId = new Map<string, string>();
+const inboundHopBySpanId = new Map<string, number>();
 
 // ── Config ────────────────────────────────────────────────────────────
 
 interface BrowserConfig {
   enabled: boolean;
   wsUrl: string;
+  blastScopeId: string | null;
+  entityCatalog: {
+    types: string[];
+  };
+  lineage: {
+    maxHops: number;
+    requireBlastScope: boolean;
+    messageKey: string;
+  };
 }
 
 const config: BrowserConfig = {
   enabled: true,
   wsUrl: "",
+  blastScopeId: readDefinedString("__FLIGHTBOX_BLAST_SCOPE_ID__"),
+  entityCatalog: {
+    types: readDefinedStringArray("__FLIGHTBOX_ENTITY_TYPES__"),
+  },
+  lineage: {
+    maxHops: 2,
+    requireBlastScope: true,
+    messageKey: "_fb",
+  },
 };
 
 export function configure(overrides: Partial<BrowserConfig>): void {
-  Object.assign(config, overrides);
+  const { entityCatalog, lineage, ...rest } = overrides;
+  Object.assign(config, rest);
+
+  if (entityCatalog) {
+    config.entityCatalog = {
+      ...config.entityCatalog,
+      ...entityCatalog,
+      types: normalizeEntityTypes(entityCatalog.types ?? config.entityCatalog.types),
+    };
+  }
+
+  if (lineage) {
+    config.lineage = {
+      ...config.lineage,
+      ...lineage,
+    };
+  }
+
   if (overrides.wsUrl) connectWebSocket();
+}
+
+// ── Lineage helpers ───────────────────────────────────────────────────
+
+export function withLineage<T extends Record<string, unknown>>(
+  payload: T,
+  opts?: { key?: string },
+): T {
+  if (!isRecord(payload)) {
+    throw new Error("withLineage payload must be an object");
+  }
+
+  const key = opts?.key ?? config.lineage.messageKey;
+  const ctx = extract();
+  if (!ctx) return payload;
+
+  if (config.lineage.requireBlastScope && !config.blastScopeId) {
+    return payload;
+  }
+
+  const subject = selectTrackedEntityForSpan(ctx.span_id, config.entityCatalog.types);
+  if (!subject) return payload;
+
+  const lineage: LineagePayload = {
+    trace_id: ctx.trace_id,
+    span_id: ctx.span_id,
+    subject_entity: subject,
+    actor_system: actorBySpanId.get(ctx.span_id) ?? "unknown",
+    hop: inboundHopBySpanId.get(ctx.span_id) ?? 0,
+    max_hops: config.lineage.maxHops,
+    blast_scope_id: config.blastScopeId,
+  };
+
+  recordLineageSend(ctx.span_id, lineage);
+  return { ...payload, [key]: lineage };
+}
+
+export function runWithLineage<T>(
+  payload: unknown,
+  fn: () => T,
+  opts?: { key?: string },
+): T {
+  const key = opts?.key ?? config.lineage.messageKey;
+  const active = extract();
+  const hasLineageKey = hasOwnLineageKey(payload, key);
+  const lineage = parseLineage(payload, key);
+
+  if (!lineage) {
+    if (active && hasLineageKey) {
+      recordLineageRecv(active.span_id, {
+        trace_id: active.trace_id,
+        span_id: active.span_id,
+        subject_entity: { type: "UNKNOWN" },
+        actor_system: actorBySpanId.get(active.span_id) ?? "unknown",
+        hop: 0,
+        max_hops: config.lineage.maxHops,
+        blast_scope_id: config.blastScopeId,
+      }, "gap");
+    }
+    return fn();
+  }
+
+  if (lineage.hop >= lineage.max_hops) {
+    if (active) recordLineageRecv(active.span_id, lineage, "gap");
+    return fn();
+  }
+
+  if (active) {
+    inboundHopBySpanId.set(active.span_id, lineage.hop + 1);
+    recordLineageRecv(active.span_id, lineage, "exact");
+  }
+
+  const nextContext: SpanContext = {
+    trace_id: lineage.trace_id,
+    span_id: lineage.span_id,
+  };
+  return inject(nextContext, fn);
 }
 
 // ── WebSocket connection ──────────────────────────────────────────────
@@ -169,18 +315,86 @@ function finalizeEntityTracking(span: Span): void {
   eventsBySpanId.delete(span.span_id);
   if (!events || events.length === 0) return;
 
-  let base: Record<string, unknown> = {};
-  if (span.tags) {
-    try {
-      base = JSON.parse(span.tags) as Record<string, unknown>;
-    } catch {
-      base = {};
-    }
-  }
-
+  const base = parseTags(span.tags);
   const existing = Array.isArray(base.entities) ? (base.entities as unknown[]) : [];
   base.entities = [...existing, ...events];
   span.tags = JSON.stringify(base);
+}
+
+function beginLineageTracking(spanId: string, actorSystem: string): void {
+  lineageBySpanId.set(spanId, { lineage_send: [], lineage_recv: [] });
+  actorBySpanId.set(spanId, actorSystem);
+}
+
+function finalizeLineageTracking(span: Span): void {
+  const bucket = lineageBySpanId.get(span.span_id);
+  lineageBySpanId.delete(span.span_id);
+  actorBySpanId.delete(span.span_id);
+  inboundHopBySpanId.delete(span.span_id);
+  if (!bucket) return;
+  if (bucket.lineage_send.length === 0 && bucket.lineage_recv.length === 0) return;
+
+  const tags = parseTags(span.tags);
+  tags.lineage_send = [
+    ...(Array.isArray(tags.lineage_send) ? tags.lineage_send : []),
+    ...bucket.lineage_send,
+  ];
+  tags.lineage_recv = [
+    ...(Array.isArray(tags.lineage_recv) ? tags.lineage_recv : []),
+    ...bucket.lineage_recv,
+  ];
+  span.tags = JSON.stringify(tags);
+}
+
+function stampBlastScope(span: Span): void {
+  if (!config.blastScopeId) return;
+  const tags = parseTags(span.tags);
+  tags.blast_scope_id = config.blastScopeId;
+  span.tags = JSON.stringify(tags);
+}
+
+function recordLineageSend(spanId: string, payload: LineagePayload): void {
+  const bucket = lineageBySpanId.get(spanId);
+  if (!bucket) return;
+  bucket.lineage_send.push({
+    ...payload,
+    at: Date.now(),
+    evidence_kind: "exact",
+  });
+}
+
+function recordLineageRecv(
+  spanId: string,
+  payload: LineagePayload,
+  evidenceKind: LineageEvidenceKind,
+): void {
+  const bucket = lineageBySpanId.get(spanId);
+  if (!bucket) return;
+  bucket.lineage_recv.push({
+    ...payload,
+    at: Date.now(),
+    evidence_kind: evidenceKind,
+  });
+}
+
+function selectTrackedEntityForSpan(
+  spanId: string,
+  trackedTypes: string[],
+): LineageSubjectEntity | undefined {
+  const events = eventsBySpanId.get(spanId);
+  if (!events || events.length === 0) return undefined;
+
+  const whitelist = new Set(trackedTypes);
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (whitelist.size > 0 && !whitelist.has(ev.entity_type)) continue;
+    return {
+      type: ev.entity_type,
+      id: ev.entity_id,
+    };
+  }
+
+  return undefined;
 }
 
 export function trackEntity(input: TrackEntityInput): boolean {
@@ -289,7 +503,9 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
 
     const parent = callStack[callStack.length - 1] ?? undefined;
     const span = createSpan(meta, parent, args, this);
+    stampBlastScope(span);
     beginEntityTracking(span.span_id);
+    beginLineageTracking(span.span_id, `${span.module}#${span.name}`);
 
     const ctx: SpanContext = { trace_id: span.trace_id, span_id: span.span_id };
     callStack.push(ctx);
@@ -302,6 +518,7 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
         callStack.pop();
         completeSpan(span, "[Generator]");
         finalizeEntityTracking(span);
+        finalizeLineageTracking(span);
         bufferSpan(span);
         return result;
       }
@@ -312,6 +529,7 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
             popContext(ctx);
             completeSpan(span, val);
             finalizeEntityTracking(span);
+            finalizeLineageTracking(span);
             bufferSpan(span);
             return val;
           },
@@ -319,6 +537,7 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
             popContext(ctx);
             failSpan(span, err);
             finalizeEntityTracking(span);
+            finalizeLineageTracking(span);
             bufferSpan(span);
             throw err;
           },
@@ -328,12 +547,14 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
       callStack.pop();
       completeSpan(span, result);
       finalizeEntityTracking(span);
+      finalizeLineageTracking(span);
       bufferSpan(span);
       return result;
     } catch (err) {
       callStack.pop();
       failSpan(span, err);
       finalizeEntityTracking(span);
+      finalizeLineageTracking(span);
       bufferSpan(span);
       throw err;
     }
@@ -367,6 +588,48 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   );
 }
 
+function parseLineage(payload: unknown, key: string): LineagePayload | undefined {
+  if (!isRecord(payload)) return undefined;
+  const raw = payload[key];
+  if (!isRecord(raw)) return undefined;
+
+  const traceId = raw.trace_id;
+  const spanId = raw.span_id;
+  const actorSystem = raw.actor_system;
+  const hop = raw.hop;
+  const maxHops = raw.max_hops;
+  const blastScopeId = raw.blast_scope_id;
+  const subject = raw.subject_entity;
+
+  if (typeof traceId !== "string" || traceId.length === 0) return undefined;
+  if (typeof spanId !== "string" || spanId.length === 0) return undefined;
+  if (typeof actorSystem !== "string" || actorSystem.length === 0) return undefined;
+  if (typeof hop !== "number" || !Number.isFinite(hop) || hop < 0) return undefined;
+  if (typeof maxHops !== "number" || !Number.isFinite(maxHops) || maxHops < 1) return undefined;
+  if (blastScopeId != null && typeof blastScopeId !== "string") return undefined;
+  if (!isRecord(subject) || typeof subject.type !== "string" || subject.type.length === 0) {
+    return undefined;
+  }
+  if (subject.id != null && typeof subject.id !== "string") return undefined;
+
+  return {
+    trace_id: traceId,
+    span_id: spanId,
+    subject_entity: {
+      type: subject.type,
+      id: typeof subject.id === "string" ? subject.id : undefined,
+    },
+    actor_system: actorSystem,
+    hop,
+    max_hops: maxHops,
+    blast_scope_id: typeof blastScopeId === "string" ? blastScopeId : null,
+  };
+}
+
+function hasOwnLineageKey(payload: unknown, key: string): boolean {
+  return isRecord(payload) && Object.prototype.hasOwnProperty.call(payload, key);
+}
+
 function normalizeEntityId(
   entityId: string | number | undefined,
 ): string | undefined {
@@ -398,6 +661,46 @@ function serializeField(value: unknown): string | null | undefined {
     maxStringLength: 256,
     maxReprLength: 150,
   });
+}
+
+function parseTags(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeEntityTypes(input: unknown[]): string[] {
+  return [...new Set(
+    input
+      .map((value) => (typeof value === "string" ? value.trim() : ""))
+      .filter((value) => value.length > 0),
+  )];
+}
+
+function readDefinedString(symbolName: string): string | null {
+  if (symbolName === "__FLIGHTBOX_BLAST_SCOPE_ID__") {
+    return typeof __FLIGHTBOX_BLAST_SCOPE_ID__ === "string"
+      ? __FLIGHTBOX_BLAST_SCOPE_ID__
+      : null;
+  }
+  return null;
+}
+
+function readDefinedStringArray(symbolName: string): string[] {
+  if (symbolName === "__FLIGHTBOX_ENTITY_TYPES__") {
+    if (typeof __FLIGHTBOX_ENTITY_TYPES__ === "undefined") return [];
+    if (!Array.isArray(__FLIGHTBOX_ENTITY_TYPES__)) return [];
+    return normalizeEntityTypes(__FLIGHTBOX_ENTITY_TYPES__);
+  }
+  return [];
 }
 
 // ── Auto-connect on import ────────────────────────────────────────────

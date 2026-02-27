@@ -1,5 +1,13 @@
 import { z } from "zod";
-import { query, fromSpans, countSpans, getTracesDir } from "./db.js";
+import {
+  query,
+  fromSpans,
+  countSpans,
+  getTracesDir,
+  getConfiguredEntityTypes,
+  causalEdgesViewSql,
+  entityEventsViewSql,
+} from "./db.js";
 
 // Helper to escape SQL string values
 function esc(s: string): string {
@@ -36,6 +44,10 @@ interface EntityEventRow {
   has_error: boolean;
 }
 
+interface EntityEventRowWithDiff extends EntityEventRow {
+  diff?: Record<string, { from: unknown; to: unknown }> | null;
+}
+
 interface EntityEventFilter {
   entity_type?: string;
   entity_id?: string;
@@ -43,6 +55,16 @@ interface EntityEventFilter {
   trace_id?: string;
   last_n_minutes?: number;
   limit?: number;
+}
+
+interface CausalEdge {
+  from_node_id: string;
+  to_node_id: string;
+  edge_kind: "call" | "lineage";
+  evidence_kind: "exact" | "inferred" | "gap";
+  confidence: number;
+  trace_id?: string;
+  at?: number;
 }
 
 // ─── Tool Schemas ───
@@ -110,6 +132,10 @@ export const entityTimelineSchema = z.object({
   action: z.enum(["create", "update", "delete", "upsert", "custom"]).optional(),
   trace_id: z.string().optional(),
   last_n_minutes: z.number().optional(),
+  field_filter: z.string().optional().describe(
+    "Filter to events where this field changed in the snapshot (e.g. 'position', 'state'). " +
+    "Also computes diffs between consecutive snapshots for this field.",
+  ),
   limit: z.number().default(200),
 });
 
@@ -184,6 +210,11 @@ export async function flightboxSummary(
 export async function flightboxChildren(
   params: z.infer<typeof childrenSchema>,
 ) {
+  const edges = await loadCausalEdges();
+  const lineageChildren = edges
+    .filter((edge) => edge.from_node_id === params.span_id && edge.edge_kind === "lineage")
+    .map((edge) => edge.to_node_id);
+
   const out: Record<string, unknown>[] = [];
   const visited = new Set<string>();
   const maxDepth = Math.max(1, params.depth ?? 1);
@@ -218,6 +249,28 @@ export async function flightboxChildren(
   }
 
   await walk(params.span_id, 1);
+
+  if (lineageChildren.length > 0) {
+    const linked = await query(
+      fromSpans(
+        `span_id IN (${lineageChildren.map((id) => `'${esc(id)}'`).join(",")})`,
+        "started_at ASC",
+      ),
+    );
+    for (const s of linked) {
+      out.push({
+        span_id: s.span_id,
+        parent_id: params.span_id,
+        depth: 1,
+        name: s.name,
+        duration_ms: s.duration_ms,
+        has_error: !!(s.error && s.error !== ""),
+        cross_process: true,
+        via_edge: "lineage",
+      });
+    }
+  }
+
   return out;
 }
 
@@ -240,67 +293,98 @@ export async function flightboxWalk(
   );
   if (start.length === 0) return { error: "Span not found" };
 
-  const chain: Record<string, unknown>[] = [];
-  const visited = new Set<string>();
+  // Scope to the trace to avoid loading all spans into memory
+  const traceId = String(start[0].trace_id);
+  const spans = await query(
+    fromSpans(`trace_id = '${esc(traceId)}'`, "started_at ASC"),
+  );
 
-  // Walk up (ancestors)
+  const spanById = new Map<string, Record<string, unknown>>();
+  for (const span of spans) {
+    spanById.set(String(span.span_id), span);
+  }
+
+  const edges = await loadCausalEdges({ trace_id: traceId });
+  const outgoing = new Map<string, CausalEdge[]>();
+  const incoming = new Map<string, CausalEdge[]>();
+  for (const edge of edges) {
+    const out = outgoing.get(edge.from_node_id) ?? [];
+    out.push(edge);
+    outgoing.set(edge.from_node_id, out);
+
+    const inc = incoming.get(edge.to_node_id) ?? [];
+    inc.push(edge);
+    incoming.set(edge.to_node_id, inc);
+  }
+
+  const out: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+
   if (params.direction === "up" || params.direction === "both") {
-    let current = start[0];
-    let depth = 0;
-    while (
-      current.parent_id &&
-      current.parent_id !== "" &&
-      depth < params.depth
-    ) {
-      if (visited.has(current.parent_id as string)) break;
-      visited.add(current.parent_id as string);
-
-      const parent = await query(
-        fromSpans(`span_id = '${esc(current.parent_id as string)}'`) +
-          " LIMIT 1",
-      );
-      if (parent.length === 0) break;
-      chain.unshift({
-        span_id: parent[0].span_id,
-        name: parent[0].name,
-        duration_ms: parent[0].duration_ms,
-        has_error: !!(parent[0].error && parent[0].error !== ""),
-      });
-      current = parent[0];
-      depth++;
+    const queue: Array<{ id: string; depth: number }> = [{ id: params.span_id, depth: 0 }];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (current.depth >= params.depth) continue;
+      for (const edge of incoming.get(current.id) ?? []) {
+        const parent = spanById.get(edge.from_node_id);
+        if (!parent) continue;
+        const key = `up:${edge.from_node_id}:${edge.to_node_id}:${edge.edge_kind}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          span_id: parent.span_id,
+          name: parent.name,
+          duration_ms: parent.duration_ms,
+          has_error: !!(parent.error && parent.error !== ""),
+          via_edge: edge.edge_kind,
+          evidence_kind: edge.evidence_kind,
+          confidence: edge.confidence,
+          direction: "up",
+          depth: current.depth + 1,
+        });
+        queue.push({ id: edge.from_node_id, depth: current.depth + 1 });
+      }
     }
   }
 
-  // Add current span
-  chain.push({
-    span_id: start[0].span_id,
-    name: start[0].name,
-    duration_ms: start[0].duration_ms,
-    has_error: !!(start[0].error && start[0].error !== ""),
+  const startSpan = start[0];
+  out.push({
+    span_id: startSpan.span_id,
+    name: startSpan.name,
+    duration_ms: startSpan.duration_ms,
+    has_error: !!(startSpan.error && startSpan.error !== ""),
     is_target: true,
+    confidence: 1,
   });
 
-  // Walk down (descendants)
   if (params.direction === "down" || params.direction === "both") {
-    async function walkDown(parentId: string, depth: number) {
-      if (depth <= 0) return;
-      const children = await query(
-        fromSpans(`parent_id = '${esc(parentId)}'`, "started_at ASC"),
-      );
-      for (const child of children) {
-        chain.push({
+    const queue: Array<{ id: string; depth: number }> = [{ id: params.span_id, depth: 0 }];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (current.depth >= params.depth) continue;
+      for (const edge of outgoing.get(current.id) ?? []) {
+        const child = spanById.get(edge.to_node_id);
+        if (!child) continue;
+        const key = `down:${edge.from_node_id}:${edge.to_node_id}:${edge.edge_kind}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
           span_id: child.span_id,
           name: child.name,
           duration_ms: child.duration_ms,
           has_error: !!(child.error && child.error !== ""),
+          via_edge: edge.edge_kind,
+          evidence_kind: edge.evidence_kind,
+          confidence: edge.confidence,
+          direction: "down",
+          depth: current.depth + 1,
         });
-        await walkDown(child.span_id as string, depth - 1);
+        queue.push({ id: edge.to_node_id, depth: current.depth + 1 });
       }
     }
-    await walkDown(params.span_id, params.depth);
   }
 
-  return chain;
+  return out;
 }
 
 export async function flightboxSearch(
@@ -497,6 +581,7 @@ export async function flightboxEntities(
   params: z.infer<typeof entitiesSchema>,
 ) {
   const events = await loadEntityEvents(params);
+  const configuredTypes = getConfiguredEntityTypes();
   const byType = new Map<string, {
     total_events: number;
     actions: Record<string, number>;
@@ -532,9 +617,21 @@ export async function flightboxEntities(
     }))
     .sort((a, b) => b.total_events - a.total_events);
 
+  const observedTypes = types.map((t) => t.entity_type);
+  const observedSet = new Set(observedTypes);
+  const configuredSet = new Set(configuredTypes);
+  const unobservedConfigured = configuredTypes.filter((type) => !observedSet.has(type));
+  const unknownObserved = observedTypes.filter((type) => configuredSet.size > 0 && !configuredSet.has(type));
+
   return {
     total_events: events.length,
     unique_entity_types: types.length,
+    coverage: {
+      configured_entity_types: configuredTypes,
+      observed_entity_types: observedTypes,
+      unobserved_configured_types: unobservedConfigured,
+      unknown_observed_types: unknownObserved,
+    },
     entity_types: types,
     sample_events: events.slice(0, Math.max(1, Math.min(20, params.limit))),
   };
@@ -548,15 +645,49 @@ export async function flightboxEntityTimeline(
     entity_type: params.entity_type,
   });
 
-  const timeline = events
+  let timeline = events
     .sort((a, b) => a.at - b.at)
     .slice(0, Math.max(1, Math.min(1000, params.limit)));
+
+  // Compute diffs between consecutive snapshots per entity_id
+  const enriched = computeSnapshotDiffs(timeline, params.field_filter);
+
+  // Apply field_filter: keep only events where the filtered field changed
+  if (params.field_filter) {
+    const field = params.field_filter;
+    timeline = enriched.filter((ev) => {
+      if (!ev.diff) return false;
+      const diff = ev.diff as Record<string, unknown>;
+      return field in diff;
+    });
+  } else {
+    timeline = enriched;
+  }
+
+  // Collect trace_ids from timeline for scoped edge loading
+  const traceIds = [...new Set(timeline.map((ev) => ev.trace_id).filter(Boolean))];
+  const edges = await loadCausalEdges(
+    traceIds.length > 0 ? { trace_ids: traceIds } : undefined,
+  );
+  const incomingBySpan = new Map<string, CausalEdge[]>();
+  const outgoingBySpan = new Map<string, CausalEdge[]>();
+  for (const edge of edges) {
+    const incoming = incomingBySpan.get(edge.to_node_id) ?? [];
+    incoming.push(edge);
+    incomingBySpan.set(edge.to_node_id, incoming);
+
+    const outgoing = outgoingBySpan.get(edge.from_node_id) ?? [];
+    outgoing.push(edge);
+    outgoingBySpan.set(edge.from_node_id, outgoing);
+  }
 
   const callGraphAnchors = timeline.map((ev) => ({
     at: ev.at,
     action: ev.action,
     entity_type: ev.entity_type,
     entity_id: ev.entity_id,
+    snapshot: ev.snapshot,
+    diff: (ev as EntityEventRowWithDiff).diff ?? null,
     span_id: ev.span_id,
     parent_id: ev.parent_id,
     trace_id: ev.trace_id,
@@ -564,12 +695,35 @@ export async function flightboxEntityTimeline(
     module: ev.module,
   }));
 
+  const crossProcessLinks = timeline.flatMap((ev) => {
+    const incoming = (incomingBySpan.get(ev.span_id) ?? []).filter((edge) => edge.edge_kind === "lineage");
+    const outgoing = (outgoingBySpan.get(ev.span_id) ?? []).filter((edge) => edge.edge_kind === "lineage");
+    return [
+      ...incoming.map((edge) => ({
+        direction: "incoming",
+        from_span_id: edge.from_node_id,
+        to_span_id: edge.to_node_id,
+        evidence_kind: edge.evidence_kind,
+        confidence: edge.confidence,
+      })),
+      ...outgoing.map((edge) => ({
+        direction: "outgoing",
+        from_span_id: edge.from_node_id,
+        to_span_id: edge.to_node_id,
+        evidence_kind: edge.evidence_kind,
+        confidence: edge.confidence,
+      })),
+    ];
+  });
+
   return {
     entity_type: params.entity_type,
     entity_id: params.entity_id ?? null,
     total_events: timeline.length,
-    timeline,
+    field_filter: params.field_filter ?? null,
+    timeline: callGraphAnchors,
     call_graph_anchors: callGraphAnchors,
+    cross_process_links: crossProcessLinks,
   };
 }
 
@@ -604,22 +758,108 @@ export async function flightboxQuery(
   }
 }
 
+async function loadCausalEdges(filter?: {
+  trace_id?: string;
+  trace_ids?: string[];
+  last_n_minutes?: number;
+}): Promise<CausalEdge[]> {
+  let traceFilter = "";
+  if (filter?.trace_ids && filter.trace_ids.length > 0) {
+    traceFilter = `trace_id IN (${filter.trace_ids.map((id) => `'${esc(id)}'`).join(",")})`;
+  } else if (filter?.trace_id) {
+    traceFilter = `trace_id = '${esc(filter.trace_id)}'`;
+  }
+  const where = and(
+    traceFilter,
+    timeFilter(filter?.last_n_minutes),
+  );
+  const rows = await query(causalEdgesViewSql(where || undefined));
+
+  const edges: CausalEdge[] = [];
+  for (const row of rows) {
+    const fromNodeId = String(row.from_node_id ?? "");
+    const toNodeId = String(row.to_node_id ?? "");
+    const edgeKind = String(row.edge_kind ?? "");
+    const evidenceKind = String(row.evidence_kind ?? "");
+    if (!fromNodeId || !toNodeId) continue;
+    if (edgeKind !== "call" && edgeKind !== "lineage") continue;
+    if (evidenceKind !== "exact" && evidenceKind !== "inferred" && evidenceKind !== "gap") continue;
+    edges.push({
+      from_node_id: fromNodeId,
+      to_node_id: toNodeId,
+      edge_kind: edgeKind,
+      evidence_kind: evidenceKind,
+      confidence: toNumber(row.confidence) ?? (evidenceKind === "exact" ? 1 : evidenceKind === "inferred" ? 0.5 : 0),
+      trace_id: typeof row.trace_id === "string" ? row.trace_id : undefined,
+      at: toNumber(row.event_at) ?? undefined,
+    });
+  }
+  return edges;
+}
+
 async function loadEntityEvents(
   filter: EntityEventFilter,
 ): Promise<EntityEventRow[]> {
   const where = and(
-    `tags IS NOT NULL`,
-    `tags != ''`,
     filter.trace_id ? `trace_id = '${esc(filter.trace_id)}'` : "",
     timeFilter(filter.last_n_minutes),
   );
 
+  const limit = Math.max(100, Math.min(10000, (filter.limit ?? 200) * 10));
   const rows = await query(
-    fromSpans(where, "started_at DESC") +
-      ` LIMIT ${Math.max(100, Math.min(10000, (filter.limit ?? 200) * 10))}`,
+    entityEventsViewSql(where || undefined) +
+      ` ORDER BY event_at DESC LIMIT ${limit}`,
   );
 
-  const events = rows.flatMap(parseEntityEventsFromSpan);
+  const spanIds = [...new Set(rows.map((row) => String(row.span_id ?? "")).filter(Boolean))];
+  if (spanIds.length === 0) return [];
+
+  const spans = await query(
+    fromSpans(
+      `span_id IN (${spanIds.map((id) => `'${esc(id)}'`).join(",")})`,
+    ),
+  );
+  const spanById = new Map<string, SpanRow>(
+    spans.map((span) => [String(span.span_id), span]),
+  );
+
+  const events: EntityEventRow[] = [];
+  for (const row of rows) {
+    const spanId = String(row.span_id ?? "");
+    const span = spanById.get(spanId);
+    if (!span) continue;
+
+    const traceId = String(row.trace_id ?? span.trace_id ?? "");
+    const parentIdRaw = span.parent_id;
+    const parentId = parentIdRaw && String(parentIdRaw).length > 0
+      ? String(parentIdRaw)
+      : null;
+
+    events.push({
+      action: String(row.action ?? ""),
+      entity_type: String(row.entity_type ?? ""),
+      entity_id: typeof row.entity_id === "string" && row.entity_id.length > 0
+        ? row.entity_id
+        : undefined,
+      snapshot: typeof row.snapshot === "string" && row.snapshot.length > 0
+        ? row.snapshot : null,
+      changes: typeof row.changes === "string" && row.changes.length > 0
+        ? row.changes : null,
+      note: typeof row.note === "string" && row.note.length > 0
+        ? row.note : undefined,
+      dimensions: parseDimensionsJson(row.dimensions_json),
+      at: toNumber(row.event_at) ?? toNumber(span.started_at) ?? Date.now(),
+      span_id: spanId,
+      trace_id: traceId,
+      parent_id: parentId,
+      name: String(span.name ?? ""),
+      module: String(span.module ?? ""),
+      started_at: toNumber(span.started_at) ?? Date.now(),
+      duration_ms: toNumber(span.duration_ms),
+      has_error: !!(span.error && span.error !== ""),
+    });
+  }
+
   return events
     .filter((ev) => !filter.entity_type || ev.entity_type === filter.entity_type)
     .filter((ev) => !filter.entity_id || ev.entity_id === filter.entity_id)
@@ -628,65 +868,63 @@ async function loadEntityEvents(
     .slice(0, Math.max(1, Math.min(2000, filter.limit ?? 200)));
 }
 
-function parseEntityEventsFromSpan(span: SpanRow): EntityEventRow[] {
-  const tagsRaw = span.tags;
-  if (!tagsRaw || typeof tagsRaw !== "string") return [];
+// ─── Diff Computation ───
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(tagsRaw);
-  } catch {
-    return [];
-  }
+function computeSnapshotDiffs(
+  events: EntityEventRow[],
+  _fieldFilter?: string,
+): EntityEventRowWithDiff[] {
+  // Group by entity_id to compute per-entity diffs
+  const prevByEntity = new Map<string, Record<string, unknown>>();
 
-  const entities = (parsed as { entities?: unknown[] }).entities;
-  if (!Array.isArray(entities) || entities.length === 0) return [];
+  return events.map((ev) => {
+    const entityKey = ev.entity_id ?? "__no_id__";
 
-  const spanId = String(span.span_id ?? "");
-  const traceId = String(span.trace_id ?? "");
-  if (!spanId || !traceId) return [];
+    // If the event already has explicit changes (caller-provided diff), use those
+    if (ev.changes) {
+      try {
+        const parsed = JSON.parse(ev.changes);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          // Update prev snapshot for next diff computation
+          if (ev.snapshot) {
+            try { prevByEntity.set(entityKey, JSON.parse(ev.snapshot)); } catch {}
+          }
+          return { ...ev, diff: parsed as Record<string, { from: unknown; to: unknown }> };
+        }
+      } catch {}
+    }
 
-  const parentIdRaw = span.parent_id;
-  const parentId = parentIdRaw && String(parentIdRaw).length > 0
-    ? String(parentIdRaw)
-    : null;
+    // Compute diff from consecutive snapshots
+    if (!ev.snapshot) return { ...ev, diff: null };
 
-  const startedAt = toNumber(span.started_at) ?? Date.now();
-  const durationMs = toNumber(span.duration_ms);
-  const hasError = !!(span.error && span.error !== "");
+    let current: Record<string, unknown>;
+    try {
+      current = JSON.parse(ev.snapshot);
+      if (!current || typeof current !== "object" || Array.isArray(current)) {
+        return { ...ev, diff: null };
+      }
+    } catch {
+      return { ...ev, diff: null };
+    }
 
-  const out: EntityEventRow[] = [];
-  for (const entity of entities) {
-    if (!entity || typeof entity !== "object") continue;
-    const raw = entity as Record<string, unknown>;
-    const entityType = typeof raw.entity_type === "string"
-      ? raw.entity_type
-      : "";
-    const action = typeof raw.action === "string" ? raw.action : "";
-    if (!entityType || !action) continue;
+    const prev = prevByEntity.get(entityKey);
+    prevByEntity.set(entityKey, current);
 
-    const at = toNumber(raw.at) ?? startedAt;
-    out.push({
-      action,
-      entity_type: entityType,
-      entity_id: typeof raw.entity_id === "string" ? raw.entity_id : undefined,
-      snapshot: typeof raw.snapshot === "string" ? raw.snapshot : null,
-      changes: typeof raw.changes === "string" ? raw.changes : null,
-      note: typeof raw.note === "string" ? raw.note : undefined,
-      dimensions: isRecord(raw.dimensions) ? normalizeDimensions(raw.dimensions) : undefined,
-      at,
-      span_id: spanId,
-      trace_id: traceId,
-      parent_id: parentId,
-      name: String(span.name ?? ""),
-      module: String(span.module ?? ""),
-      started_at: startedAt,
-      duration_ms: durationMs,
-      has_error: hasError,
-    });
-  }
+    if (!prev) return { ...ev, diff: null };
 
-  return out;
+    // Compute key-by-key diff between prev and current
+    const diff: Record<string, { from: unknown; to: unknown }> = {};
+    const allKeys = new Set([...Object.keys(prev), ...Object.keys(current)]);
+    for (const key of allKeys) {
+      const prevVal = prev[key];
+      const currVal = current[key];
+      if (JSON.stringify(prevVal) !== JSON.stringify(currVal)) {
+        diff[key] = { from: prevVal ?? null, to: currVal ?? null };
+      }
+    }
+
+    return { ...ev, diff: Object.keys(diff).length > 0 ? diff : null };
+  });
 }
 
 // ─── Helpers ───
@@ -709,6 +947,19 @@ async function resolveAncestors(
   return ids;
 }
 
+function parseDimensionsJson(
+  raw: unknown,
+): Record<string, string | number | boolean | null> | undefined {
+  if (typeof raw !== "string" || raw.length === 0) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parsed as Record<string, string | number | boolean | null>;
+  } catch {
+    return undefined;
+  }
+}
+
 function toNumber(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "bigint") return Number(v);
@@ -717,27 +968,6 @@ function toNumber(v: unknown): number | null {
     return Number.isFinite(n) ? n : null;
   }
   return null;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-function normalizeDimensions(
-  input: Record<string, unknown>,
-): Record<string, string | number | boolean | null> {
-  const out: Record<string, string | number | boolean | null> = {};
-  for (const [k, v] of Object.entries(input)) {
-    if (
-      v === null ||
-      typeof v === "string" ||
-      typeof v === "number" ||
-      typeof v === "boolean"
-    ) {
-      out[k] = v;
-    }
-  }
-  return out;
 }
 
 async function resolveDescendants(

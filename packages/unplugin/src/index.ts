@@ -1,7 +1,14 @@
 import { createUnplugin } from "unplugin";
 import { createTransformer, type TransformOptions } from "@flightbox/register";
 
-export interface FlightboxPluginOptions extends TransformOptions {}
+export interface FlightboxPluginOptions extends TransformOptions {
+  entities?: {
+    types?: string[];
+  };
+  lineage?: {
+    maxHops?: number;
+  };
+}
 
 export const unpluginFactory = (options?: FlightboxPluginOptions) => {
   const transform = createTransformer({

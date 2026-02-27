@@ -2,13 +2,14 @@ import { unplugin } from "./index.js";
 import { DuckDBInstance } from "@duckdb/node-api";
 import type { DuckDBConnection } from "@duckdb/node-api";
 import type { Span } from "@flightbox/core";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { WebSocketServer } from "ws";
 import type { Plugin } from "vite";
 import type { FlightboxPluginOptions } from "./index.js";
+import { createHash } from "node:crypto";
 
 // ── Parquet writer (batched, persistent DuckDB) ───────────────────────
 
@@ -137,16 +138,50 @@ function getGitChangedFiles(): string[] {
   }
 }
 
+interface FlightboxManifest {
+  generated_at: string;
+  blast_scope_id: string;
+  include_patterns: string[];
+  declared_entity_types: string[];
+  lineage: {
+    max_hops: number;
+    require_blast_scope: true;
+    message_key: "_fb";
+  };
+}
+
+function computeBlastScopeId(
+  includePatterns: string[],
+  entityTypes: string[],
+  maxHops: number,
+): string {
+  const hash = createHash("sha1")
+    .update(JSON.stringify({
+      includePatterns: [...includePatterns].sort(),
+      entityTypes: [...entityTypes].sort(),
+      maxHops,
+    }))
+    .digest("hex");
+  return hash.slice(0, 16);
+}
+
 // ── Vite plugin ───────────────────────────────────────────────────────
 
 export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
   const tracesDir = join(homedir(), ".flightbox", "traces");
+  const declaredEntityTypes = [...new Set(
+    (options?.entities?.types ?? [])
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0),
+  )];
+  const maxHops = Math.max(1, Math.floor(options?.lineage?.maxHops ?? 2));
 
   // Build include patterns from git blast radius + explicit includes
   const gitFiles = getGitChangedFiles();
   const gitPatterns = gitFiles.map((f) => `**/${f}`);
   const userInclude = options?.include ?? [];
   const mergedInclude = [...gitPatterns, ...userInclude];
+  const blastScopeId = computeBlastScopeId(mergedInclude, declaredEntityTypes, maxHops);
 
   if (mergedInclude.length > 0) {
     console.log(`[flightbox] instrumenting ${gitFiles.length} git-changed files${userInclude.length ? ` + ${userInclude.length} include patterns` : ""}`);
@@ -170,11 +205,36 @@ export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
             "@flightbox/sdk": "@flightbox/sdk/browser",
           },
         },
+        define: {
+          __FLIGHTBOX_BLAST_SCOPE_ID__: JSON.stringify(blastScopeId),
+          __FLIGHTBOX_ENTITY_TYPES__: JSON.stringify(declaredEntityTypes),
+        },
       };
     },
 
     configureServer(server) {
       const writer = new ParquetWriter(tracesDir);
+      process.env.FLIGHTBOX_BLAST_SCOPE_ID = blastScopeId;
+      process.env.FLIGHTBOX_ENTITY_TYPES = JSON.stringify(declaredEntityTypes);
+
+      const manifest: FlightboxManifest = {
+        generated_at: new Date().toISOString(),
+        blast_scope_id: blastScopeId,
+        include_patterns: mergedInclude,
+        declared_entity_types: declaredEntityTypes,
+        lineage: {
+          max_hops: maxHops,
+          require_blast_scope: true,
+          message_key: "_fb",
+        },
+      };
+      const manifestDir = resolve(process.cwd(), ".flightbox");
+      mkdirSync(manifestDir, { recursive: true });
+      writeFileSync(
+        join(manifestDir, "manifest.json"),
+        JSON.stringify(manifest, null, 2),
+        "utf8",
+      );
 
       const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 * 1024 });
 

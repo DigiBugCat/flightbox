@@ -4,6 +4,11 @@ import { storage } from "./context.js";
 import { getConfig } from "./config.js";
 import { bufferSpan } from "./buffer.js";
 import { beginEntityTracking, finalizeEntityTracking } from "./entity.js";
+import {
+  beginLineageTracking,
+  finalizeLineageTracking,
+  stampBlastScope,
+} from "./lineage.js";
 
 export function __flightbox_wrap<T extends (...args: any[]) => any>(
   fn: T,
@@ -20,7 +25,9 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
     const parent = storage.getStore();
     const span = createSpan(meta, parent, args, this);
     span.git_sha = cfg.gitSha;
+    stampBlastScope(span);
     beginEntityTracking(span.span_id);
+    beginLineageTracking(span.span_id, `${span.module}#${span.name}`);
 
     return storage.run(
       { trace_id: span.trace_id, span_id: span.span_id },
@@ -32,6 +39,7 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
           if (isGenerator) {
             completeSpan(span, "[Generator]");
             finalizeEntityTracking(span);
+            finalizeLineageTracking(span);
             bufferSpan(span);
             return result;
           }
@@ -41,12 +49,14 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
               (val) => {
                 completeSpan(span, val);
                 finalizeEntityTracking(span);
+                finalizeLineageTracking(span);
                 bufferSpan(span);
                 return val;
               },
               (err) => {
                 failSpan(span, err);
                 finalizeEntityTracking(span);
+                finalizeLineageTracking(span);
                 bufferSpan(span);
                 throw err;
               },
@@ -55,11 +65,13 @@ export function __flightbox_wrap<T extends (...args: any[]) => any>(
 
           completeSpan(span, result);
           finalizeEntityTracking(span);
+          finalizeLineageTracking(span);
           bufferSpan(span);
           return result;
         } catch (err) {
           failSpan(span, err);
           finalizeEntityTracking(span);
+          finalizeLineageTracking(span);
           bufferSpan(span);
           throw err;
         }

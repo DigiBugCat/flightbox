@@ -133,7 +133,9 @@ server.tool(
 
 server.tool(
   "flightbox_entity_timeline",
-  "Timeline for one entity type (and optional id), including span anchors so you can walk the call graph around each entity mutation.",
+  "Timeline for one entity type (and optional id), including span anchors so you can walk the call graph around each entity mutation. " +
+  "Returns snapshot data and computed diffs between consecutive snapshots. " +
+  "Use field_filter to narrow to events where a specific field changed (e.g. 'position', 'state').",
   entityTimelineSchema.shape,
   async (params) => ({
     content: [

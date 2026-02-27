@@ -3,6 +3,7 @@ export { configure, getConfig } from "./config.js";
 export { startFlushing, stopFlushing, flush } from "./buffer.js";
 export { storage } from "./context.js";
 export { extract, inject } from "./propagation.js";
+export { withLineage, runWithLineage } from "./lineage.js";
 export {
   trackEntity,
   trackEntityCreate,

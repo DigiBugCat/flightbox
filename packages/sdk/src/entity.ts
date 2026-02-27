@@ -14,7 +14,7 @@ export interface TrackEntityInput {
   dimensions?: Record<string, string | number | boolean | null>;
 }
 
-interface EntityEvent {
+export interface EntityEvent {
   action: EntityAction;
   entity_type: string;
   entity_id?: string;
@@ -49,6 +49,30 @@ export function finalizeEntityTracking(span: Span): void {
   const existing = Array.isArray(base.entities) ? (base.entities as unknown[]) : [];
   base.entities = [...existing, ...events];
   span.tags = JSON.stringify(base);
+}
+
+export function getEntityEventsForSpan(spanId: string): EntityEvent[] {
+  return [...(eventsBySpanId.get(spanId) ?? [])];
+}
+
+export function selectTrackedEntityForSpan(
+  spanId: string,
+  trackedTypes: string[],
+): { type: string; id?: string } | undefined {
+  const events = eventsBySpanId.get(spanId);
+  if (!events || events.length === 0) return undefined;
+
+  const whitelist = new Set(trackedTypes);
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (whitelist.size > 0 && !whitelist.has(ev.entity_type)) continue;
+    return {
+      type: ev.entity_type,
+      id: ev.entity_id,
+    };
+  }
+
+  return undefined;
 }
 
 export function trackEntity(input: TrackEntityInput): boolean {
