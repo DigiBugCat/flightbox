@@ -2,7 +2,7 @@ import { unplugin } from "./index.js";
 import { DuckDBInstance } from "@duckdb/node-api";
 import type { DuckDBConnection } from "@duckdb/node-api";
 import type { Span } from "@flightbox/core";
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
@@ -174,6 +174,27 @@ function computeBlastScopeId(
   return hash.slice(0, 16);
 }
 
+// ── Session cleanup ───────────────────────────────────────────────────
+
+function cleanTracesDir(dir: string): void {
+  try {
+    const files = readdirSync(dir);
+    let removed = 0;
+    for (const f of files) {
+      if (!f.endsWith(".parquet")) continue;
+      try {
+        unlinkSync(join(dir, f));
+        removed++;
+      } catch {}
+    }
+    if (removed > 0) {
+      console.log(`[flightbox] cleaned ${removed} traces from previous session`);
+    }
+  } catch {
+    // Dir may not exist yet
+  }
+}
+
 // ── Project detection ─────────────────────────────────────────────────
 
 function detectProjectName(): string | null {
@@ -261,6 +282,9 @@ export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
     },
 
     configureServer(server) {
+      // Wipe previous session traces on dev server start
+      cleanTracesDir(tracesDir);
+
       const writer = new ParquetWriter(tracesDir);
       process.env.FLIGHTBOX_BLAST_SCOPE_ID = blastScopeId;
       process.env.FLIGHTBOX_OBJECT_TYPES = JSON.stringify(declaredObjectTypes);

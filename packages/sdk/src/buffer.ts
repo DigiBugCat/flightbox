@@ -1,6 +1,8 @@
 import type { Span } from "@flightbox/core";
 import { getConfig } from "./config.js";
 import { flushToParquet } from "./flush.js";
+import { readdirSync, unlinkSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 
 let buffer: Span[] = [];
 let flushTimer: ReturnType<typeof setInterval> | null = null;
@@ -18,6 +20,10 @@ export function bufferSpan(span: Span): void {
 export function startFlushing(): void {
   if (flushTimer) return;
   const cfg = getConfig();
+
+  // Wipe previous session traces on startup
+  cleanTracesDir(cfg.tracesDir);
+
   flushTimer = setInterval(() => void drain(), cfg.flushIntervalMs);
   flushTimer.unref(); // Don't keep the process alive
 
@@ -56,6 +62,24 @@ async function onShutdown(): Promise<void> {
   isShuttingDown = true;
   stopFlushing();
   await drain();
+}
+
+function cleanTracesDir(dir: string): void {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const files = readdirSync(dir);
+    let removed = 0;
+    for (const f of files) {
+      if (!f.endsWith(".parquet")) continue;
+      try {
+        unlinkSync(join(dir, f));
+        removed++;
+      } catch {}
+    }
+    if (removed > 0 && process.env.FLIGHTBOX_DEBUG) {
+      console.log(`[flightbox] cleaned ${removed} traces from previous session`);
+    }
+  } catch {}
 }
 
 export { drain as flush };
