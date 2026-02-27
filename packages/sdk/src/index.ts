@@ -11,6 +11,8 @@ export {
   trackEntityDelete,
 } from "./wrap.js";
 export { annotate } from "./wrap.js";
+export { createTransportLineageAdapter } from "./transport.js";
+export type { TransportAdapter } from "./transport.js";
 export type { EntityAction, TrackEntityInput } from "./causality.js";
 
 // Auto-start flushing on import — zero config needed
