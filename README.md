@@ -164,6 +164,37 @@ const processOrder = __flightbox_wrap(
 
 **`@flightbox/sdk/browser`** — Same `__flightbox_wrap` interface but browser-compatible. Uses an array-based call stack instead of `AsyncLocalStorage` (browser JS is single-threaded). Batches spans and sends them as JSON over WebSocket during `requestIdleCallback` — never during a frame.
 
+Both runtimes also expose cross-context propagation helpers:
+
+```ts
+import { extract, inject } from '@flightbox/sdk'
+// Browser entry also exports the same API:
+// import { extract, inject } from '@flightbox/sdk/browser'
+
+const ctx = extract()
+if (ctx) {
+  inject(ctx, () => {
+    // work runs as child of ctx
+  })
+}
+```
+
+In the browser, `inject()` is async-safe: if the callback returns a Promise, the injected context remains active across `await` until that Promise resolves or rejects.
+
+Server → browser propagation example:
+
+```ts
+// server broadcast
+delta._fb = extract()
+
+// browser websocket handler
+if (msg._fb) {
+  inject(msg._fb, () => store.applyDelta(msg))
+} else {
+  store.applyDelta(msg)
+}
+```
+
 The Vite plugin receives these spans on the dev server and writes them to the same `~/.flightbox/traces/` directory as Node spans. The MCP server reads them identically — it doesn't know or care whether a span came from Node or a browser.
 
 ```

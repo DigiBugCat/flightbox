@@ -14,6 +14,37 @@ import type { Span, SpanMeta, SpanContext } from "@flightbox/core";
 
 const callStack: SpanContext[] = [];
 
+export function extract(): SpanContext | undefined {
+  return callStack[callStack.length - 1];
+}
+
+export function inject<T>(context: SpanContext, fn: () => T): T {
+  callStack.push(context);
+
+  try {
+    const result = fn();
+
+    if (isPromiseLike(result)) {
+      return result.then(
+        (value) => {
+          popContext(context);
+          return value;
+        },
+        (err) => {
+          popContext(context);
+          throw err;
+        },
+      ) as T;
+    }
+
+    popContext(context);
+    return result;
+  } catch (err) {
+    popContext(context);
+    throw err;
+  }
+}
+
 export type EntityAction = "create" | "update" | "delete" | "upsert" | "custom";
 
 export interface TrackEntityInput {
@@ -326,6 +357,14 @@ function popContext(ctx: SpanContext): void {
       return;
     }
   }
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === "object" || typeof value === "function") &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
 }
 
 function normalizeEntityId(
