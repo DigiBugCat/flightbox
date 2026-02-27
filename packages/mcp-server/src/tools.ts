@@ -1050,6 +1050,121 @@ HAVING COUNT(*) >= ${Math.max(1, params.min_flips)}
   }
 }
 
+// ─── Schema Introspection ───
+
+export const schemaSchema = z.object({
+  object_type: z.string().optional().describe(
+    "Filter to a specific object type. Omit to see schemas for all observed types.",
+  ),
+  last_n_minutes: z.number().optional(),
+  sample_limit: z.number().default(100).describe(
+    "Max snapshots to sample per object type for schema inference.",
+  ),
+});
+
+export async function flightboxSchema(
+  params: z.infer<typeof schemaSchema>,
+) {
+  const clauses: string[] = [
+    `spans.tags_json IS NOT NULL`,
+  ];
+  const tf = timeFilter(params.last_n_minutes);
+  if (tf) clauses.push(tf);
+  if (params.object_type) {
+    clauses.push(`CAST(json_extract_string(json_each.value, '$.object_type') AS VARCHAR) = '${esc(params.object_type)}'`);
+  }
+
+  const sampleLimit = Math.max(1, Math.min(500, params.sample_limit));
+
+  // Pull snapshot data from object events
+  const sql = `
+SELECT
+  CAST(json_extract_string(json_each.value, '$.object_type') AS VARCHAR) AS object_type,
+  CAST(json_extract_string(json_each.value, '$.snapshot') AS VARCHAR) AS snapshot
+FROM (
+  SELECT *, TRY_CAST(tags AS JSON) AS tags_json
+  FROM ${fromSpansInline()}
+) AS spans,
+LATERAL json_each(COALESCE(json_extract(spans.tags_json, '$.objects'), '[]'))
+WHERE ${clauses.join(" AND ")}
+AND CAST(json_extract_string(json_each.value, '$.snapshot') AS VARCHAR) IS NOT NULL
+AND CAST(json_extract_string(json_each.value, '$.snapshot') AS VARCHAR) != ''
+ORDER BY spans.started_at DESC
+LIMIT ${sampleLimit * 10}
+`;
+
+  try {
+    const rows = await query(sql);
+
+    // Group by object_type, infer schema from snapshots
+    const byType = new Map<string, {
+      snapshots: string[];
+      fields: Map<string, { types: Set<string>; samples: unknown[]; count: number }>;
+    }>();
+
+    for (const row of rows) {
+      const objectType = String(row.object_type ?? "");
+      if (!objectType) continue;
+
+      let bucket = byType.get(objectType);
+      if (!bucket) {
+        bucket = { snapshots: [], fields: new Map() };
+        byType.set(objectType, bucket);
+      }
+      if (bucket.snapshots.length >= sampleLimit) continue;
+
+      const snapshotStr = String(row.snapshot ?? "");
+      bucket.snapshots.push(snapshotStr);
+
+      try {
+        const parsed = JSON.parse(snapshotStr);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          for (const [key, value] of Object.entries(parsed)) {
+            let field = bucket.fields.get(key);
+            if (!field) {
+              field = { types: new Set(), samples: [], count: 0 };
+              bucket.fields.set(key, field);
+            }
+            field.count++;
+            field.types.add(inferType(value));
+            if (field.samples.length < 3) {
+              field.samples.push(value);
+            }
+          }
+        }
+      } catch {}
+    }
+
+    const schemas = [...byType.entries()].map(([objectType, bucket]) => ({
+      object_type: objectType,
+      snapshot_count: bucket.snapshots.length,
+      fields: [...bucket.fields.entries()]
+        .sort((a, b) => b[1].count - a[1].count)
+        .map(([name, info]) => ({
+          name,
+          types: [...info.types],
+          frequency: `${info.count}/${bucket.snapshots.length}`,
+          samples: info.samples,
+        })),
+    }));
+
+    return {
+      object_types: schemas,
+      total_types: schemas.length,
+    };
+  } catch (err) {
+    return { error: String(err) };
+  }
+}
+
+function inferType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  const t = typeof value;
+  if (t === "object") return "object";
+  return t; // string, number, boolean
+}
+
 async function loadCausalEdges(filter?: {
   trace_id?: string;
   trace_ids?: string[];

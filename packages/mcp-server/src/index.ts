@@ -18,6 +18,7 @@ import {
   inputStabilitySchema,
   intervalsSchema,
   oscillationSchema,
+  schemaSchema,
   flightboxSummary,
   flightboxChildren,
   flightboxInspect,
@@ -33,6 +34,7 @@ import {
   flightboxInputStability,
   flightboxIntervals,
   flightboxOscillation,
+  flightboxSchema,
 } from "./tools.js";
 
 const server = new McpServer({
@@ -213,6 +215,19 @@ server.tool(
   async (params) => ({
     content: [
       { type: "text", text: JSON.stringify(await flightboxOscillation(params), null, 2) },
+    ],
+  }),
+);
+
+server.tool(
+  "flightbox_schema",
+  "Discover the shape of tracked objects. Shows field names, types, frequency, and sample values " +
+  "inferred from captured snapshots. Use to understand what fields are available before querying " +
+  "object timelines or writing SQL against snapshot data.",
+  schemaSchema.shape,
+  async (params) => ({
+    content: [
+      { type: "text", text: JSON.stringify(await flightboxSchema(params), null, 2) },
     ],
   }),
 );
