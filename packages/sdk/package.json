@@ -1,6 +1,6 @@
 {
   "name": "@flightbox/sdk",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "description": "Runtime SDK for Flightbox instrumentation",
   "type": "module",
   "main": "dist/index.js",
