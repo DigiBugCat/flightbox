@@ -1,25 +1,57 @@
 import { DuckDBInstance } from "@duckdb/node-api";
 import type { DuckDBConnection } from "@duckdb/node-api";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import { readdirSync, statSync, unlinkSync, existsSync, readFileSync } from "node:fs";
 
 let instance: DuckDBInstance | null = null;
 let connection: DuckDBConnection | null = null;
 
+/**
+ * Resolve the traces directory. Priority:
+ * 1. FLIGHTBOX_TRACES_DIR env var (explicit override)
+ * 2. Per-project dir: ~/.flightbox/traces/{project-name}/ (auto-detected from cwd)
+ * 3. Fallback: ~/.flightbox/traces/ (legacy flat directory)
+ */
 export function getTracesDir(): string {
-  return (
-    process.env.FLIGHTBOX_TRACES_DIR ??
-    join(homedir(), ".flightbox", "traces")
-  );
+  if (process.env.FLIGHTBOX_TRACES_DIR) {
+    return process.env.FLIGHTBOX_TRACES_DIR;
+  }
+
+  const base = join(homedir(), ".flightbox", "traces");
+  const projectName = detectProjectName();
+  if (projectName) {
+    const projectDir = join(base, projectName);
+    // Use project-scoped dir if it exists, otherwise fall back to base
+    if (existsSync(projectDir)) return projectDir;
+  }
+
+  return base;
 }
 
+function detectProjectName(): string | null {
+  try {
+    const pkgPath = join(process.cwd(), "package.json");
+    if (existsSync(pkgPath)) {
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+      if (typeof pkg.name === "string" && pkg.name.trim()) {
+        return pkg.name.replace(/^@/, "").replace(/\//g, "-").replace(/[^a-zA-Z0-9._-]/g, "");
+      }
+    }
+  } catch {}
+  return basename(process.cwd());
+}
+
+const DEFAULT_RETENTION_HOURS = 24;
+
 /**
- * Remove empty (0-byte) parquet files that would break read_parquet glob.
+ * Remove empty (0-byte) parquet files and files older than retention period.
  * Runs lazily — cheap to call often since it's a single readdir + stat.
  */
-export function cleanEmptyParquetFiles(): number {
+export function cleanParquetFiles(): number {
   const dir = getTracesDir();
+  const retentionMs = (Number(process.env.FLIGHTBOX_RETENTION_HOURS) || DEFAULT_RETENTION_HOURS) * 60 * 60 * 1000;
+  const cutoff = Date.now() - retentionMs;
   let removed = 0;
   try {
     const files = readdirSync(dir);
@@ -28,7 +60,7 @@ export function cleanEmptyParquetFiles(): number {
       const filepath = join(dir, f);
       try {
         const st = statSync(filepath);
-        if (st.size === 0) {
+        if (st.size === 0 || st.mtimeMs < cutoff) {
           unlinkSync(filepath);
           removed++;
         }
@@ -55,7 +87,7 @@ export async function query(
   sql: string,
 ): Promise<Record<string, unknown>[]> {
   // Clean up any 0-byte files before querying
-  cleanEmptyParquetFiles();
+  cleanParquetFiles();
 
   const conn = await getConnection();
   const reader = await conn.runAndReadAll(sql);
