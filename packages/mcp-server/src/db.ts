@@ -10,36 +10,13 @@ let connection: DuckDBConnection | null = null;
 /**
  * Resolve the traces directory. Priority:
  * 1. FLIGHTBOX_TRACES_DIR env var (explicit override)
- * 2. Per-project dir: ~/.flightbox/traces/{project-name}/ (auto-detected from cwd)
- * 3. Fallback: ~/.flightbox/traces/ (legacy flat directory)
+ * 2. Per-project dir: ~/.flightbox/traces/{cwd basename}/
  */
 export function getTracesDir(): string {
   if (process.env.FLIGHTBOX_TRACES_DIR) {
     return process.env.FLIGHTBOX_TRACES_DIR;
   }
-
-  const base = join(homedir(), ".flightbox", "traces");
-  const projectName = detectProjectName();
-  if (projectName) {
-    const projectDir = join(base, projectName);
-    // Use project-scoped dir if it exists, otherwise fall back to base
-    if (existsSync(projectDir)) return projectDir;
-  }
-
-  return base;
-}
-
-function detectProjectName(): string | null {
-  try {
-    const pkgPath = join(process.cwd(), "package.json");
-    if (existsSync(pkgPath)) {
-      const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-      if (typeof pkg.name === "string" && pkg.name.trim()) {
-        return pkg.name.replace(/^@/, "").replace(/\//g, "-").replace(/[^a-zA-Z0-9._-]/g, "");
-      }
-    }
-  } catch {}
-  return basename(process.cwd());
+  return join(homedir(), ".flightbox", "traces", basename(process.cwd()));
 }
 
 const DEFAULT_RETENTION_HOURS = 24;

@@ -1,7 +1,6 @@
 import { execSync } from "node:child_process";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
-import { existsSync, readFileSync } from "node:fs";
 
 export interface ObjectCatalogConfig {
   types: string[];
@@ -84,26 +83,8 @@ export function getConfig(): SdkConfig {
 
 function detectProjectTracesDir(): string {
   const base = join(homedir(), ".flightbox", "traces");
-  const projectName = detectProjectName();
-  if (projectName) return join(base, projectName);
-  return base;
-}
-
-function detectProjectName(): string | null {
-  // Try package.json name first
-  try {
-    const pkgPath = join(process.cwd(), "package.json");
-    if (existsSync(pkgPath)) {
-      const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-      if (typeof pkg.name === "string" && pkg.name.trim()) {
-        // Sanitize: @scope/name → scope-name, strip non-alphanumeric
-        return pkg.name.replace(/^@/, "").replace(/\//g, "-").replace(/[^a-zA-Z0-9._-]/g, "");
-      }
-    }
-  } catch {}
-
-  // Fall back to directory name
-  return basename(process.cwd());
+  const project = basename(process.cwd());
+  return join(base, project);
 }
 
 function detectGitSha(): string | null {

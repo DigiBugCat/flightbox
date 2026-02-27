@@ -2,7 +2,7 @@ import { unplugin } from "./index.js";
 import { DuckDBInstance } from "@duckdb/node-api";
 import type { DuckDBConnection } from "@duckdb/node-api";
 import type { Span } from "@flightbox/core";
-import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
@@ -197,26 +197,14 @@ function cleanTracesDir(dir: string): void {
 
 // ── Project detection ─────────────────────────────────────────────────
 
-function detectProjectName(): string | null {
-  try {
-    const pkgPath = join(process.cwd(), "package.json");
-    if (existsSync(pkgPath)) {
-      const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-      if (typeof pkg.name === "string" && pkg.name.trim()) {
-        return pkg.name.replace(/^@/, "").replace(/\//g, "-").replace(/[^a-zA-Z0-9._-]/g, "");
-      }
-    }
-  } catch {}
+function detectProjectName(): string {
   return basename(process.cwd());
 }
 
 // ── Vite plugin ───────────────────────────────────────────────────────
 
 export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
-  const projectName = detectProjectName();
-  const tracesDir = projectName
-    ? join(homedir(), ".flightbox", "traces", projectName)
-    : join(homedir(), ".flightbox", "traces");
+  const tracesDir = join(homedir(), ".flightbox", "traces", detectProjectName());
   const declaredObjectTypes: string[] = [...new Set(
     (options?.objects?.types ?? [] as string[])
       .map((t: string) => t.trim())
