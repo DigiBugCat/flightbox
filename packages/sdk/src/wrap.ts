@@ -1,87 +1,59 @@
-import { createSpan, completeSpan, failSpan } from "@flightbox/core";
-import type { SpanMeta } from "@flightbox/core";
+import type { SpanContext } from "@flightbox/core";
 import { storage } from "./context.js";
 import { getConfig } from "./config.js";
 import { bufferSpan } from "./buffer.js";
-import { beginEntityTracking, finalizeEntityTracking } from "./entity.js";
 import {
-  beginLineageTracking,
-  finalizeLineageTracking,
-  stampBlastScope,
-} from "./lineage.js";
+  createWrap,
+  createEntityStore,
+  createLineageStore,
+  createEntityTrackers,
+  createLineageHelpers,
+  type ContextProvider,
+  type CausalityConfig,
+} from "./causality.js";
 
-export function __flightbox_wrap<T extends (...args: any[]) => any>(
-  fn: T,
-  meta: SpanMeta,
-): T {
-  // Detect generator functions — they return iterators, not promises
-  const isGenerator = fn.constructor?.name === "GeneratorFunction" ||
-    fn.constructor?.name === "AsyncGeneratorFunction";
+// Node context provider — delegates to AsyncLocalStorage
+const nodeProvider: ContextProvider = {
+  extract: () => storage.getStore(),
+  inject: <T>(ctx: SpanContext, fn: () => T): T => storage.run(ctx, fn),
+};
 
-  const wrapped = function (this: unknown, ...args: unknown[]) {
-    const cfg = getConfig();
-    if (!cfg.enabled) return fn.apply(this, args);
+// Shared stores for the Node runtime
+export const entityStore = createEntityStore();
+export const lineageStore = createLineageStore();
 
-    const parent = storage.getStore();
-    const span = createSpan(meta, parent, args, this);
-    span.git_sha = cfg.gitSha;
-    stampBlastScope(span);
-    beginEntityTracking(span.span_id);
-    beginLineageTracking(span.span_id, `${span.module}#${span.name}`);
-
-    return storage.run(
-      { trace_id: span.trace_id, span_id: span.span_id },
-      () => {
-        try {
-          const result = fn.apply(this, args);
-
-          // Generators return iterators — record the span immediately and pass through
-          if (isGenerator) {
-            completeSpan(span, "[Generator]");
-            finalizeEntityTracking(span);
-            finalizeLineageTracking(span);
-            bufferSpan(span);
-            return result;
-          }
-
-          if (result && typeof result === "object" && typeof (result as any).then === "function") {
-            return (result as Promise<unknown>).then(
-              (val) => {
-                completeSpan(span, val);
-                finalizeEntityTracking(span);
-                finalizeLineageTracking(span);
-                bufferSpan(span);
-                return val;
-              },
-              (err) => {
-                failSpan(span, err);
-                finalizeEntityTracking(span);
-                finalizeLineageTracking(span);
-                bufferSpan(span);
-                throw err;
-              },
-            );
-          }
-
-          completeSpan(span, result);
-          finalizeEntityTracking(span);
-          finalizeLineageTracking(span);
-          bufferSpan(span);
-          return result;
-        } catch (err) {
-          failSpan(span, err);
-          finalizeEntityTracking(span);
-          finalizeLineageTracking(span);
-          bufferSpan(span);
-          throw err;
-        }
-      },
-    );
-  } as unknown as T;
-
-  // Preserve function name for debugging
-  Object.defineProperty(wrapped, "name", { value: fn.name });
-  Object.defineProperty(wrapped, "length", { value: fn.length });
-
-  return wrapped;
+function getCausalityConfig(): CausalityConfig {
+  const cfg = getConfig();
+  return {
+    enabled: cfg.enabled,
+    blastScopeId: cfg.blastScopeId,
+    gitSha: cfg.gitSha,
+    entityCatalog: cfg.entityCatalog,
+    lineage: cfg.lineage,
+  };
 }
+
+export const __flightbox_wrap = createWrap(
+  nodeProvider,
+  entityStore,
+  lineageStore,
+  getCausalityConfig,
+  bufferSpan,
+);
+
+// Re-export entity trackers bound to node provider + store
+const trackers = createEntityTrackers(nodeProvider, entityStore);
+export const trackEntity = trackers.trackEntity;
+export const trackEntityCreate = trackers.trackEntityCreate;
+export const trackEntityUpdate = trackers.trackEntityUpdate;
+export const trackEntityDelete = trackers.trackEntityDelete;
+
+// Re-export lineage helpers bound to node provider + stores
+const lineageHelpers = createLineageHelpers(
+  nodeProvider,
+  lineageStore,
+  entityStore,
+  getCausalityConfig,
+);
+export const withLineage = lineageHelpers.withLineage;
+export const runWithLineage = lineageHelpers.runWithLineage;
