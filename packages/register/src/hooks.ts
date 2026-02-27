@@ -4,7 +4,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 
-const include = process.env.FLIGHTBOX_INCLUDE?.split(",") ?? undefined;
+// FLIGHTBOX_ONLY replaces all include patterns; FLIGHTBOX_INCLUDE adds to them
+const envOnly = process.env.FLIGHTBOX_ONLY?.split(",").map((s) => s.trim()).filter(Boolean);
+const envInclude = process.env.FLIGHTBOX_INCLUDE?.split(",").map((s) => s.trim()).filter(Boolean);
+const include = envOnly && envOnly.length > 0 ? envOnly : envInclude ?? undefined;
+
 const exclude = process.env.FLIGHTBOX_EXCLUDE?.split(",") ?? [
   "**/node_modules/**",
   "**/*.test.*",

@@ -121,6 +121,13 @@ class ParquetWriter {
   }
 }
 
+// ── Env pattern parsing ───────────────────────────────────────────────
+
+function parseEnvPatterns(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 // ── Git blast radius ──────────────────────────────────────────────────
 
 function getGitChangedFiles(): string[] {
@@ -142,6 +149,8 @@ interface FlightboxManifest {
   generated_at: string;
   blast_scope_id: string;
   include_patterns: string[];
+  env_include_patterns: string[];
+  env_only_patterns: string[];
   declared_entity_types: string[];
   lineage: {
     max_hops: number;
@@ -176,15 +185,36 @@ export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
   )];
   const maxHops = Math.max(1, Math.floor(options?.lineage?.maxHops ?? 2));
 
-  // Build include patterns from git blast radius + explicit includes
-  const gitFiles = getGitChangedFiles();
-  const gitPatterns = gitFiles.map((f) => `**/${f}`);
+  // Build include patterns from git blast radius + explicit includes + env overrides
+  const envInclude = parseEnvPatterns(process.env.FLIGHTBOX_INCLUDE);
+  const envOnly = parseEnvPatterns(process.env.FLIGHTBOX_ONLY);
   const userInclude = options?.include ?? [];
-  const mergedInclude = [...gitPatterns, ...userInclude];
+
+  let gitFiles: string[] = [];
+  let gitPatterns: string[] = [];
+  let mergedInclude: string[];
+
+  if (envOnly.length > 0) {
+    // FLIGHTBOX_ONLY replaces git scoping entirely
+    mergedInclude = [...envOnly, ...userInclude];
+  } else {
+    gitFiles = getGitChangedFiles();
+    gitPatterns = gitFiles.map((f) => `**/${f}`);
+    mergedInclude = [...gitPatterns, ...userInclude, ...envInclude];
+  }
+
   const blastScopeId = computeBlastScopeId(mergedInclude, declaredEntityTypes, maxHops);
 
-  if (mergedInclude.length > 0) {
-    console.log(`[flightbox] instrumenting ${gitFiles.length} git-changed files${userInclude.length ? ` + ${userInclude.length} include patterns` : ""}`);
+  const parts: string[] = [];
+  if (envOnly.length > 0) {
+    parts.push(`FLIGHTBOX_ONLY: ${envOnly.length} patterns (git scoping disabled)`);
+  } else {
+    if (gitFiles.length > 0) parts.push(`${gitFiles.length} git-changed files`);
+    if (envInclude.length > 0) parts.push(`${envInclude.length} FLIGHTBOX_INCLUDE patterns`);
+  }
+  if (userInclude.length > 0) parts.push(`${userInclude.length} include patterns`);
+  if (parts.length > 0) {
+    console.log(`[flightbox] instrumenting ${parts.join(" + ")}`);
   }
 
   const mergedOptions: FlightboxPluginOptions = {
@@ -221,6 +251,8 @@ export default function flightbox(options?: FlightboxPluginOptions): Plugin[] {
         generated_at: new Date().toISOString(),
         blast_scope_id: blastScopeId,
         include_patterns: mergedInclude,
+        env_include_patterns: envInclude,
+        env_only_patterns: envOnly,
         declared_entity_types: declaredEntityTypes,
         lineage: {
           max_hops: maxHops,
