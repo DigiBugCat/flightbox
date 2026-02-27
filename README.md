@@ -266,6 +266,12 @@ Lineage attachment requires:
 | `flightbox_intervals` | Timing between consecutive calls. Detects tick rate mismatches. |
 | `flightbox_oscillation` | Detects values ping-ponging between states (A→B→A→B). Works on object snapshots or raw span inputs. |
 
+### Schema introspection
+
+| Tool | What it does |
+|------|-------------|
+| `flightbox_schema` | Infer the shape of tracked objects from captured snapshots. Shows field names, types, frequency, and sample values. |
+
 ### Raw SQL
 
 | Tool | What it does |
