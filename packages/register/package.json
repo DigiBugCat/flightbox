@@ -1,6 +1,6 @@
 {
   "name": "@flightbox/register",
-  "version": "0.0.14",
+  "version": "0.0.15",
   "description": "Node.js loader hook for Flightbox auto-instrumentation",
   "type": "module",
   "main": "dist/index.js",
